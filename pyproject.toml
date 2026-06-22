@@ -1,0 +1,27 @@
+[project]
+name = "farewell-rss"
+dynamic = ["version"]
+description = "我到现在终于没有见——大约 RSS 的确死了。"
+readme = "README.md"
+authors = [
+    { name = "轩哥有内涵"}
+]
+requires-python = ">=3.10"
+urls = { Repository = "https://github.com/xuangeyouneihan/FarewellRSS" }
+dependencies = []
+
+[project.scripts]
+farewell-rss = "farewell_rss:main"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build]
+dev-mode-dirs = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/farewell_rss"]
