@@ -32,7 +32,7 @@
 
 ## API
 
-后端完全基于 [Google Reader API](docs/API.md) 与前端通信，同时扩展了注册、删号、TAG 分离等端点。[详细文档 →](docs/API.md)
+后端完全基于 Google Reader API 与前端通信，同时扩展了注册、删号、TAG 分离等端点。详见 [docs/API.md](docs/API.md)。
 
 ## 画饼
 
