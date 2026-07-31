@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,7 +68,7 @@ class StarStateRepository:
         timestamp: datetime | None = None,
     ) -> StarState:
         if timestamp is None:
-            timestamp = datetime.now(datetime.UTC)
+            timestamp = datetime.now(UTC)
         star_state = await self.get(user_id, entry_id)
         if star_state:
             _logger.debug("更新收藏状态 %d/%d", user_id, entry_id)

@@ -1,8 +1,35 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
+
+
+class UTCDateTime(TypeDecorator):
+    """存入时去掉 tzinfo，读出时自动补回 UTC。
+
+    SQLite 不存时区——所有 datetime 实际以 naive 字符串存储。
+    这个包装器确保业务代码始终读写 aware datetime(tzinfo=UTC)，
+    同时校验写入时区必须是 UTC。
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect):
+        if value is not None:
+            if value.tzinfo is None:
+                raise ValueError(f"必须传入带 UTC 时区的 datetime，收到 naive: {value!r}")
+            if value.utcoffset() != UTC.utcoffset(None):
+                raise ValueError(f"只接受 UTC 时区，收到: {value!r}")
+            return value.replace(tzinfo=None)
+        return None
+
+    def process_result_value(self, value: datetime | None, dialect):
+        if value is not None:
+            return value.replace(tzinfo=UTC)
+        return None
 
 
 class Base(DeclarativeBase):
@@ -21,7 +48,7 @@ class User(Base):
     friendly_name: Mapped[str | None] = mapped_column(Text)  # 用户昵称，可选
     is_admin: Mapped[bool] = mapped_column(default=False)
     deleted_at: Mapped[datetime | None] = mapped_column(
-        default=None
+        UTCDateTime(), default=None
     )  # 用户被删除的时间，若为 None 则表示未被删除
 
 
@@ -38,9 +65,9 @@ class Feed(Base):
     title: Mapped[str | None] = mapped_column(Text)
     link: Mapped[str | None] = mapped_column(Text)  # RSS 源页面的链接，给人看的
     subtitle: Mapped[str | None] = mapped_column(Text)  # RSS 源副标题/描述
-    published: Mapped[datetime | None]  # RSS 源发布的 UTC 时间
-    updated: Mapped[datetime | None]  # RSS 源更新的 UTC 时间
-    fetched: Mapped[datetime]  # RSS 源最后一次抓取的 UTC 时间
+    published: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    updated: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    fetched: Mapped[datetime] = mapped_column(UTCDateTime())
     author_name: Mapped[str | None] = mapped_column(Text)
     author_href: Mapped[str | None] = mapped_column(Text)
     author_email: Mapped[str | None] = mapped_column(Text)
@@ -109,9 +136,9 @@ class Entry(Base):
     link: Mapped[str | None] = mapped_column(
         Text
     )  # RSS 条目链接，可以给人看或者用在条目本身没多少内容的时候
-    published: Mapped[datetime | None]  # RSS 条目发布的 UTC 时间
-    updated: Mapped[datetime | None]  # RSS 条目更新的 UTC 时间
-    fetched: Mapped[datetime]  # RSS 条目最后一次抓取的 UTC 时间
+    published: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    updated: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    fetched: Mapped[datetime] = mapped_column(UTCDateTime())
     summary: Mapped[str | None] = mapped_column(Text)  # RSS 条目摘要/描述（HTML）
     summary_plain: Mapped[str | None] = mapped_column(
         Text
@@ -151,9 +178,9 @@ class ReadState(Base):
     __tablename__ = "read_states"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
     entry_id: Mapped[int] = mapped_column(ForeignKey("entries.id"), primary_key=True)
-    timestamp: Mapped[
-        datetime | None
-    ]  # 用户最后一次阅读该条目的时间，若为 None 则表示标为已读但不显示在历史记录里
+    timestamp: Mapped[datetime | None] = mapped_column(
+        UTCDateTime()
+    )  # 若为 None 则表示标为已读但没有真正已读，不显示在历史记录里
     # 不过之后可能会取消标为已读这个操作，目前还不确定
 
 
@@ -166,4 +193,4 @@ class StarState(Base):
     tag_id: Mapped[int | None] = mapped_column(
         ForeignKey("labels.id")
     )  # 收藏时用户选择的标签 ID，若为 None 则表示未选择标签
-    timestamp: Mapped[datetime]  # 用户收藏该条目的时间
+    timestamp: Mapped[datetime] = mapped_column(UTCDateTime())

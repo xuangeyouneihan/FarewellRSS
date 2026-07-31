@@ -71,5 +71,8 @@ async def init_db() -> None:
 
 
 async def get_session():
-    async with SessionLocal() as session:
-        yield session  # 返回值，但调用者处理完后还会回到这里收尾
+    async with SessionLocal() as session:  # noqa: SIM117
+        # 事务上下文管理器，自动提交或回滚
+        # 读操作空提交就空提交吧，反正是自部署，数据库就在本地，空提交也快
+        async with session.begin():
+            yield session

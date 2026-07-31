@@ -2,7 +2,7 @@ import asyncio
 import html
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 
 import feedparser  # type: ignore[import-untyped]
@@ -49,7 +49,7 @@ class FetchedEntry:
     )
     updated: datetime | None = None  # RSS 条目更新时间，需要是 UTC 时间
     fetched: datetime = field(
-        default_factory=lambda: datetime.now(tz=datetime.UTC)
+        default_factory=lambda: datetime.now(tz=UTC)
     )  # RSS 条目最后一次抓取的 UTC 时间
     summary: str | None = None  # RSS 条目摘要/描述（HTML）
     summary_plain: str | None = None  # RSS 条目摘要/描述（纯文本）
@@ -80,7 +80,7 @@ class FetchedFeed:
     published: datetime | None = None  # RSS 源发布时间，需要是 UTC 时间
     updated: datetime | None = None  # RSS 源更新时间，需要是 UTC 时间
     fetched: datetime = field(
-        default_factory=lambda: datetime.now(tz=datetime.UTC)
+        default_factory=lambda: datetime.now(tz=UTC)
     )  # RSS 源最后一次抓取的 UTC 时间
     author: FetchedAuthor | None = None  # RSS 源作者信息
     icon: str | None = (
@@ -90,7 +90,9 @@ class FetchedFeed:
     tags: list[FetchedTag] = field(
         default_factory=list
     )  # RSS 源自己声明的标签列表，不知道有啥用，但还是存着吧，或许前端会用到
-    ttl: int | None = None  # RSS 源缓存时间，在 feedparser 中是分钟单位，返回时转换为秒单位
+    ttl: int | None = (
+        None  # RSS 源缓存时间，在 feedparser 中是分钟单位，返回时转换为秒单位
+    )
     entries: list[FetchedEntry] = field(default_factory=list)  # RSS 源条目列表
 
 
@@ -105,7 +107,7 @@ def _parse_datetime(Fetched) -> datetime | None:
         Fetched.tm_hour,
         Fetched.tm_min,
         Fetched.tm_sec,
-        tzinfo=datetime.UTC,
+        tzinfo=UTC,
     )
 
 

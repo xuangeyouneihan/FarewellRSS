@@ -176,7 +176,8 @@ async def _build_items(
     feed_service: FeedService,
     subscription_service: SubscriptionService,
     label_service: LabelService,
-    user_service: UserService,
+    read_state_service: ReadStateService,
+    star_state_service: StarStateService,
 ) -> list[dict]:
     """将 Entry 列表转为 Google Reader API 格式的 items"""
     feed_map = await feed_service.get_batch([e.feed_id for e in entries])
@@ -186,8 +187,8 @@ async def _build_items(
     folder_map = await label_service.get_batch([
         s.folder_id for s in subscription_map.values() if s.folder_id is not None
     ])
-    read_state_map = await user_service.get_read_state_batch(user, entries)
-    star_state_map = await user_service.get_star_state_batch(user, entries)
+    read_state_map = await read_state_service.get_batch(user, entries)
+    star_state_map = await star_state_service.get_batch(user, entries)
 
     items: list[dict] = []
     for entry in entries:
@@ -215,8 +216,8 @@ async def _build_items(
             "id": f"tag:google.com,2005:reader/item/{entry.id:016x}",
             "crawlTimeMsec": str(int(entry.fetched.timestamp() * 1000)),
             "timestampUsec": str(entry.id),
-            "published": int(entry.published.timestamp()),
-            "updated": int(entry.updated.timestamp()),
+            "published": int((entry.published or entry.updated or entry.fetched).timestamp()),
+            "updated": int((entry.updated or entry.published or entry.fetched).timestamp()),
             "title": entry.title,
             "canonical": [{"href": entry.link}] if entry.link else [],
             "alternate": [{"href": entry.link, "type": "text/html"}]
@@ -281,7 +282,8 @@ async def stream_contents(
         feed_service,
         subscription_service,
         label_service,
-        user_service,
+        read_state_service,
+        star_state_service,
     )
     result: dict = {"id": s, "updated": time(), "items": items}
     if continuation:
@@ -345,7 +347,8 @@ async def stream_items_contents(
         SubscriptionService, Depends(get_subscription_service)
     ],
     label_service: Annotated[LabelService, Depends(get_label_service)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
+    read_state_service: Annotated[ReadStateService, Depends(get_read_state_service)],
+    star_state_service: Annotated[StarStateService, Depends(get_star_state_service)],
     i: Annotated[list[str], Form()],
 ) -> dict:
     entry_ids = parse_item_ids(i)
@@ -360,7 +363,8 @@ async def stream_items_contents(
         feed_service,
         subscription_service,
         label_service,
-        user_service,
+        read_state_service,
+        star_state_service,
     )
     return {
         "id": "user/-/state/com.google/reading-list",

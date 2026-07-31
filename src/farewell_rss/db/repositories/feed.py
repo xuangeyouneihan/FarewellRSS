@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -108,5 +108,5 @@ class FeedRepository:
         _logger.debug("更新订阅源 %d 的抓取时间", id_)
         feed = await self.get(id_)
         if feed:
-            feed.fetched = datetime.now(datetime.UTC)
+            feed.fetched = datetime.now(UTC)
             await self._session.commit()

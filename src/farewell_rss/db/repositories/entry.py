@@ -157,12 +157,14 @@ class EntryRepository:
         """FTS5 全文搜索，支持布尔表达式和短语"""
         _logger.debug("搜索条目: %s", query)
         result = await self._session.execute(
-            text(
-                "SELECT e.* FROM entries e "
-                "JOIN entry_fts ON e.id = entry_fts.rowid "
-                "WHERE entry_fts MATCH :query "
-                "ORDER BY rank "
-                "LIMIT :limit OFFSET :offset"
+            select(Entry).from_statement(
+                text(
+                    "SELECT e.* FROM entries e "
+                    "JOIN entry_fts ON e.id = entry_fts.rowid "
+                    "WHERE entry_fts MATCH :query "
+                    "ORDER BY rank "
+                    "LIMIT :limit OFFSET :offset"
+                )
             ),
             {"query": query, "limit": limit, "offset": offset},
         )

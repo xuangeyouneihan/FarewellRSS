@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 
 from ..db.db import SessionLocal
 from ..db.repositories.entry import EntryRepository
@@ -46,7 +46,7 @@ async def _update_all_feeds(
         ttl = max(_MIN_TTL, feed.ttl) if feed.ttl is not None else _DEFAULT_TTL
         if (
             feed.fetched is not None
-            and (datetime.now(datetime.UTC) - feed.fetched).total_seconds() < ttl
+            and (datetime.now(UTC) - feed.fetched).total_seconds() < ttl
         ):
             _logger.info(
                 "订阅源 %s（%d）在 TTL 内，跳过更新",

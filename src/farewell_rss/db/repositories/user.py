@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -85,7 +85,7 @@ class UserRepository:
 
     async def mark_as_deleted(self, user: User) -> None:
         _logger.debug("标记用户 %d 为已删除", user.id)
-        user.deleted_at = datetime.now(datetime.UTC)
+        user.deleted_at = datetime.now(UTC)
         await self._session.commit()
 
     async def delete(self, user: User) -> None:
