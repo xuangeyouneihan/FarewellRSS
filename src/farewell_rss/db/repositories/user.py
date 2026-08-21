@@ -41,12 +41,16 @@ class UserRepository:
 
     async def list_(self) -> list[User]:
         _logger.debug("列出所有用户")
-        result = await self._session.execute(select(User))
+        result = await self._session.execute(
+            select(User).where(User.deleted_at.is_(None))
+        )
         return list(result.scalars().all())
 
     async def list_admins(self) -> list[User]:
         _logger.debug("列出所有管理员")
-        result = await self._session.execute(select(User).where(User.is_admin))
+        result = await self._session.execute(
+            select(User).where(User.is_admin, User.deleted_at.is_(None))
+        )
         return list(result.scalars().all())
 
     async def update_username(self, user: User, new_username: str) -> User | None:

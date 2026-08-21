@@ -10,6 +10,10 @@ import feedparser  # type: ignore[import-untyped]
 _logger = logging.getLogger(__name__)
 
 
+class FetchError(Exception):
+    """RSS 源抓取失败（网络错误等）"""
+
+
 @dataclass
 class FetchedAuthor:
     """作者类"""
@@ -191,9 +195,9 @@ async def fetch(
         raw_feed = await asyncio.to_thread(
             feedparser.parse, url, etag=etag, modified=modified
         )
-    except Exception:
+    except Exception as e:
         _logger.exception("订阅源 %s 获取失败", url)
-        return None
+        raise FetchError(url) from e
 
     if raw_feed.status == 304:
         _logger.debug("订阅源 %s 未修改", url)

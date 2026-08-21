@@ -48,6 +48,14 @@ class NotAllowedError(ServiceError, ABC):
     log_message = "操作不允许"
 
 
+class RegisterDisabledError(NotAllowedError):
+    log_message = "当前不允许注册"
+
+
+class InvalidInviteCodeError(NotAllowedError):
+    log_message = "邀请码错误"
+
+
 class LastAdminDeletionError(NotAllowedError):
     log_message = "不允许删除最后一个管理员"
 
@@ -58,6 +66,7 @@ class LastAdminDeletionError(NotAllowedError):
 
 class ValueError(ServiceError, builtins.ValueError, ABC):
     log_message = "值错误"
+
 
 class SlashInUsernameError(ValueError):
     log_message = "用户名中不允许包含斜杠（/）"

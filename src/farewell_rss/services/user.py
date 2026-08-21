@@ -11,8 +11,10 @@ from ..db.models import Entry, User
 from ..db.repositories.user import UserRepository
 from .__init__ import Filtering
 from .exceptions import (
+    InvalidInviteCodeError,
     LastAdminDeletionError,
     ListUsersPermissionError,
+    RegisterDisabledError,
     RegisterExistingUserError,
     SlashInUsernameError,
     UpdateAdminStatePermissionError,
@@ -46,19 +48,81 @@ class UserService:
     async def get(self, id_: int) -> User | None:
         return await self._repository.get(id_)
 
+    async def get_by_username(self, username: str) -> User | None:
+        return await self._repository.get_by_username(username)
+
     async def register(
-        self, username: str, password: str, friendly_name: str | None = None
+        self,
+        username: str,
+        password: str,
+        friendly_name: str | None = None,
+        invite_code: str | None = None,
     ) -> User:
         if "/" in username:
             raise SlashInUsernameError("用户名中不允许包含斜杠（/）")
         existing = await self._repository.get_by_username(username)
         if existing:
             raise RegisterExistingUserError.from_username(username)
-        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
         users = await self._repository.list_()
         is_admin = len(users) == 0  # 第一个注册的用户自动成为管理员
+
+        # 注册控制（FAREWELL_RSS_ALLOW_REGISTER / FAREWELL_RSS_INVITE_CODE）
+        # 只在已有用户时生效——第一个用户（将自动成为管理员）必须能注册，
+        # 否则禁用注册或配了邀请码就永远建不出管理员
+        if not is_admin:
+            # ALLOW_REGISTER：未配置或为真 → 允许；为假 → 拒绝
+            allow_register = os.getenv("FAREWELL_RSS_ALLOW_REGISTER")
+            if allow_register is not None and allow_register.strip().lower() not in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                _logger.warning(
+                    "注册被禁用（FAREWELL_RSS_ALLOW_REGISTER=%s）", allow_register
+                )
+                raise RegisterDisabledError
+            # 允许注册时，若配置了 INVITE_CODE 则必须匹配
+            expected_code = os.getenv("FAREWELL_RSS_INVITE_CODE")
+            if expected_code is not None and invite_code != expected_code:
+                _logger.warning("用户 %s 注册时邀请码错误", username)
+                raise InvalidInviteCodeError
+
+        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
         _logger.info(
             "注册新用户 %s，昵称：%s，是否管理员：%s",
+            username,
+            friendly_name,
+            is_admin,
+        )
+        return await self._repository.register(
+            username=username,
+            password_hash=password_hash,
+            friendly_name=friendly_name,
+            is_admin=is_admin,
+        )
+
+    async def create_user(
+        self,
+        operator: User,
+        username: str,
+        password: str,
+        friendly_name: str | None = None,
+        is_admin: bool = False,
+    ) -> User:
+        """管理员直接创建用户，不受注册开关/邀请码限制"""
+        if not operator.is_admin:
+            raise ListUsersPermissionError
+        if "/" in username:
+            raise SlashInUsernameError("用户名中不允许包含斜杠（/）")
+        existing = await self._repository.get_by_username(username)
+        if existing:
+            raise RegisterExistingUserError.from_username(username)
+        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        _logger.info(
+            "管理员 %s（%d）创建用户 %s，昵称：%s，是否管理员：%s",
+            operator.username,
+            operator.id,
             username,
             friendly_name,
             is_admin,

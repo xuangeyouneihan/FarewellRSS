@@ -248,3 +248,493 @@ async def test_login_wrong_password(client: AsyncClient):
 async def test_no_auth(client: AsyncClient):
     r = await client.get("/api/reader/api/0/subscription/list")
     assert r.status_code in (401, 422)  # 422 if FastAPI validates before auth
+
+
+async def test_edit_profile(client: AsyncClient):
+    """EditProfile：修改昵称、空串清空、未认证拒绝"""
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": "profile-user", "Password": "pw", "friendly_name": "旧昵称"},
+    )
+    assert r.status_code == 200, r.text
+    h = {"Authorization": f"GoogleLogin auth={_auth(r.text)}"}
+
+    # 修改昵称
+    r = await client.post(
+        "/api/accounts/EditProfile", data={"friendly_name": "新昵称"}, headers=h
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(f"{BASE}/user-info", headers=h)
+    assert r.json()["userName"] == "新昵称"
+
+    # 空字符串 → 置空（而不是保留原值）
+    r = await client.post(
+        "/api/accounts/EditProfile", data={"friendly_name": ""}, headers=h
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(f"{BASE}/user-info", headers=h)
+    assert r.json()["userName"] is None
+
+    # 缺省参数 → 同样置空
+    r = await client.post(
+        "/api/accounts/EditProfile", data={"friendly_name": "再改一次"}, headers=h
+    )
+    assert r.status_code == 200, r.text
+    r = await client.post("/api/accounts/EditProfile", headers=h)
+    assert r.status_code == 200, r.text
+    r = await client.get(f"{BASE}/user-info", headers=h)
+    assert r.json()["userName"] is None
+
+    # 未认证 → 拒绝（FastAPI 先校验 header 时为 422，进入认证逻辑时为 401）
+    r = await client.post("/api/accounts/EditProfile", data={"friendly_name": "x"})
+    assert r.status_code in (401, 422), r.text
+
+
+async def test_register_control(client: AsyncClient, monkeypatch):
+    """注册开关与邀请码（已有用户后）：ALLOW_REGISTER 假→403；配置邀请码→必须匹配"""
+    # 先注册一个种子用户（第一个用户无视注册控制），之后才会被拦
+    await _register(client, "seed")
+
+    # 1. 禁止注册
+    monkeypatch.setenv("FAREWELL_RSS_ALLOW_REGISTER", "false")
+    monkeypatch.delenv("FAREWELL_RSS_INVITE_CODE", raising=False)
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": "u1", "Password": "pw"},
+    )
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"]["code"] == "RegisterDisabledError"
+
+    # 2. 允许注册 + 配置邀请码：缺/错 → 403，对 → 成功
+    monkeypatch.setenv("FAREWELL_RSS_ALLOW_REGISTER", "true")
+    monkeypatch.setenv("FAREWELL_RSS_INVITE_CODE", "secret-code")
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": "u2", "Password": "pw"},
+    )
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"]["code"] == "InvalidInviteCodeError"
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": "u2", "Password": "pw", "invite_code": "wrong"},
+    )
+    assert r.status_code == 403, r.text
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": "u2", "Password": "pw", "invite_code": "secret-code"},
+    )
+    assert r.status_code == 200, r.text
+
+    # 3. 允许注册 + 未配置邀请码：直接成功
+    monkeypatch.setenv("FAREWELL_RSS_ALLOW_REGISTER", "1")
+    monkeypatch.delenv("FAREWELL_RSS_INVITE_CODE", raising=False)
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": "u3", "Password": "pw"},
+    )
+    assert r.status_code == 200, r.text
+
+    # 4. 未配置 ALLOW_REGISTER（默认允许）
+    monkeypatch.delenv("FAREWELL_RSS_ALLOW_REGISTER", raising=False)
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": "u4", "Password": "pw"},
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_first_user_bypasses_register_control(client: AsyncClient, monkeypatch):
+    """第一个用户（自动成管理员）无视注册开关和邀请码，否则建不出管理员"""
+    # 禁用注册 + 配置邀请码，第一个用户仍应注册成功
+    monkeypatch.setenv("FAREWELL_RSS_ALLOW_REGISTER", "false")
+    monkeypatch.setenv("FAREWELL_RSS_INVITE_CODE", "some-code")
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": "first-admin", "Password": "pw"},
+    )
+    assert r.status_code == 200, r.text
+    # 且自动成为管理员
+    h = {"Authorization": f"GoogleLogin auth={_auth(r.text)}"}
+    r = await client.get(f"{BASE}/user-info", headers=h)
+    assert r.json()["isAdmin"] is True
+
+    # 第二个用户开始被注册控制拦截
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": "second-user", "Password": "pw"},
+    )
+    assert r.status_code == 403, r.text
+
+
+async def test_create_user(client: AsyncClient, monkeypatch):
+    """CreateUser：管理员直接创建（无视注册开关/邀请码）、权限、重复、空密码"""
+    from sqlalchemy import text
+
+    from farewell_rss.db.db import get_session
+
+    # 先注册操作者（注册开关关闭后 _register 会失败）
+    await _register(client, "creator-admin")
+
+    # 关闭公开注册 + 配置邀请码，CreateUser 应完全无视
+    monkeypatch.setenv("FAREWELL_RSS_ALLOW_REGISTER", "false")
+    monkeypatch.setenv("FAREWELL_RSS_INVITE_CODE", "some-code")
+
+    async for session in client._transport.app.dependency_overrides[get_session]():
+        await session.execute(
+            text("UPDATE users SET is_admin = 1 WHERE username = 'creator-admin'")
+        )
+        await session.commit()
+        break
+
+    def create(
+        username: str,
+        password: str = "pw",
+        op: str = "creator-admin",
+        op_pw: str = "pw",
+        **extra,
+    ):
+        return client.post(
+            "/api/accounts/CreateUser",
+            data={
+                "username": username,
+                "password": password,
+                "operator_username": op,
+                "operator_password": op_pw,
+                **extra,
+            },
+        )
+
+    # 管理员创建普通用户（无视注册禁用与邀请码）
+    r = await create("new-user", friendly_name="新用户")
+    assert r.status_code == 201, r.text
+
+    # 新用户能登录
+    r = await client.post(
+        "/api/accounts/ClientLogin", data={"Email": "new-user", "Password": "pw"}
+    )
+    assert r.status_code == 200, r.text
+
+    # 创建管理员用户
+    r = await create("new-admin", is_admin="true")
+    assert r.status_code == 201, r.text
+    r = await client.post(
+        "/api/accounts/ClientLogin", data={"Email": "new-admin", "Password": "pw"}
+    )
+    h = {"Authorization": f"GoogleLogin auth={_auth(r.text)}"}
+    r = await client.get(f"{BASE}/user-info", headers=h)
+    assert r.json()["isAdmin"] is True
+
+    # 非管理员 → 403
+    r = await create("x1", op="new-user", op_pw="pw")
+    assert r.status_code == 403, r.text
+
+    # 重复用户名 → 409
+    r = await create("new-user")
+    assert r.status_code == 409, r.text
+
+    # 空密码 → 400
+    r = await create("x2", password="  ")
+    assert r.status_code == 400, r.text
+
+    # 操作者密码错误 → 400（不是 401）
+    r = await create("x3", op_pw="wrong")
+    assert r.status_code == 400, r.text
+
+
+async def test_list_users(client: AsyncClient):
+    """ListUsers：管理员可列出全部用户，非管理员 403"""
+    from sqlalchemy import text
+
+    from farewell_rss.db.db import get_session
+
+    h_admin = await _register(client, "list-admin")
+    h_plain = await _register(client, "list-plain")
+    async for session in client._transport.app.dependency_overrides[get_session]():
+        await session.execute(
+            text("UPDATE users SET is_admin = 1 WHERE username = 'list-admin'")
+        )
+        await session.commit()
+        break
+
+    # 非管理员 → 403
+    r = await client.get("/api/accounts/ListUsers", headers=h_plain)
+    assert r.status_code == 403, r.text
+
+    # 管理员 → 返回包含两个用户，字段齐全
+    r = await client.get("/api/accounts/ListUsers", headers=h_admin)
+    assert r.status_code == 200, r.text
+    users = {u["username"]: u for u in r.json()["users"]}
+    assert users["list-admin"]["isAdmin"] is True
+    assert users["list-plain"]["isAdmin"] is False
+    assert users["list-plain"]["friendlyName"] == "U"
+
+
+async def test_set_admin(client: AsyncClient):
+    """SetAdmin：管理员设置/取消、非管理员拒绝、最后管理员保护、不存在用户 404"""
+    from sqlalchemy import text
+
+    from farewell_rss.db.db import get_session
+
+    # 注册普通用户和目标用户，再用 SQL 把操作者提为管理员
+    ha = await _register(client, "admin-op")  # noqa: F841
+    hb = await _register(client, "target-user")
+    async for session in client._transport.app.dependency_overrides[get_session]():
+        await session.execute(
+            text("UPDATE users SET is_admin = 1 WHERE username = 'admin-op'")
+        )
+        await session.commit()
+        break
+
+    # 非管理员拒绝（target-user 尝试改自己）
+    r = await client.post(
+        "/api/accounts/SetAdmin",
+        data={
+            "username": "target-user",
+            "is_admin": "true",
+            "operator_username": "target-user",
+            "operator_password": "pw",
+        },
+    )
+    assert r.status_code == 403, r.text
+
+    # 管理员设为管理员
+    r = await client.post(
+        "/api/accounts/SetAdmin",
+        data={
+            "username": "target-user",
+            "is_admin": "true",
+            "operator_username": "admin-op",
+            "operator_password": "pw",
+        },
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(f"{BASE}/user-info", headers=hb)
+    assert r.json()["isAdmin"] is True
+
+    # 不存在用户 → 404
+    r = await client.post(
+        "/api/accounts/SetAdmin",
+        data={
+            "username": "ghost",
+            "is_admin": "true",
+            "operator_username": "admin-op",
+            "operator_password": "pw",
+        },
+    )
+    assert r.status_code == 404, r.text
+
+    # 操作者密码错误 → 400（不是 401，避免触发前端清 token）
+    r = await client.post(
+        "/api/accounts/SetAdmin",
+        data={
+            "username": "target-user",
+            "is_admin": "false",
+            "operator_username": "admin-op",
+            "operator_password": "wrong",
+        },
+    )
+    assert r.status_code == 400, r.text
+
+    # 取消 target-user 的管理员（此时还有 admin-op，允许）
+    r = await client.post(
+        "/api/accounts/SetAdmin",
+        data={
+            "username": "target-user",
+            "is_admin": "false",
+            "operator_username": "admin-op",
+            "operator_password": "pw",
+        },
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(f"{BASE}/user-info", headers=hb)
+    assert r.json()["isAdmin"] is False
+
+    # 取消最后一个管理员（admin-op 自己）→ 422
+    r = await client.post(
+        "/api/accounts/SetAdmin",
+        data={
+            "username": "admin-op",
+            "is_admin": "false",
+            "operator_username": "admin-op",
+            "operator_password": "pw",
+        },
+    )
+    assert r.status_code == 422, r.text
+
+
+# ─── type 参数与 starred-uncategorized 流 ───────────────────────────────
+
+
+async def _register(client: AsyncClient, username: str = "user") -> dict:
+    r = await client.post(
+        "/api/accounts/ClientRegister",
+        data={"Email": username, "Password": "pw", "friendly_name": "U"},
+    )
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"GoogleLogin auth={_auth(r.text)}"}
+
+
+async def _subscribe(client: AsyncClient, headers: dict) -> None:
+    with patch("farewell_rss.services.feed.fetch", side_effect=_fake_fetch):
+        r = await client.post(
+            f"{BASE}/subscription/quickadd",
+            data={"quickadd": "https://example.com/test.xml"},
+            headers=headers,
+        )
+    assert r.status_code == 200, r.text
+
+
+async def _title_to_id(client: AsyncClient, headers: dict) -> dict[str, str]:
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/reading-list",
+        headers=headers,
+    )
+    return {it["title"]: it["id"] for it in r.json()["items"]}
+
+
+async def test_label_stream_type_param(client: AsyncClient):
+    """同名 folder/tag 时，type 参数能区分"""
+    h = await _register(client)
+    await _subscribe(client, h)
+
+    # 创建同名 folder 和 tag
+    await client.post(
+        f"{BASE}/enable-tag",
+        data={"s": "user/-/label/科技", "type": "folder"},
+        headers=h,
+    )
+    await client.post(
+        f"{BASE}/enable-tag",
+        data={"s": "user/-/label/科技", "type": "tag"},
+        headers=h,
+    )
+
+    # 订阅归 folder
+    r = await client.get(f"{BASE}/subscription/list", headers=h)
+    feed_id = r.json()["subscriptions"][0]["id"]  # feed/{id}
+    r = await client.post(
+        f"{BASE}/subscription/edit",
+        data={"ac": "edit", "s": feed_id, "a": "user/-/label/科技"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+    # 收藏第一篇到 tag
+    ids = await _title_to_id(client, h)
+    entry1 = ids["《炒饭指南》第一章"]
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": entry1, "a": "user/-/label/科技"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+    # 不传 type → FOLDER 优先 → folder 下 3 个条目
+    r = await client.get(f"{BASE}/stream/contents/user/-/label/科技", headers=h)
+    assert len(r.json()["items"]) == 3
+
+    # type=folder → 3 个
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/label/科技",
+        params={"type": "folder"},
+        headers=h,
+    )
+    assert len(r.json()["items"]) == 3
+
+    # type=tag → 只有收藏的那 1 个
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/label/科技",
+        params={"type": "tag"},
+        headers=h,
+    )
+    items = r.json()["items"]
+    assert len(items) == 1
+    assert "第一章" in items[0]["title"]
+
+
+async def test_starred_uncategorized(client: AsyncClient):
+    """未分类收藏流只返回 tag_id=None 的收藏"""
+    h = await _register(client)
+    await _subscribe(client, h)
+
+    ids = await _title_to_id(client, h)
+    entry1 = ids["《炒饭指南》第一章"]
+    entry2 = ids["《炒饭指南》第二章"]
+
+    # 纯收藏 entry-1（无 tag）
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": entry1, "a": "user/-/state/com.google/starred"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    # 收藏 entry-2 到 tag
+    await client.post(
+        f"{BASE}/enable-tag",
+        data={"s": "user/-/label/收藏夹", "type": "tag"},
+        headers=h,
+    )
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": entry2, "a": "user/-/label/收藏夹"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/farewell-rss/starred-uncategorized",
+        headers=h,
+    )
+    items = r.json()["items"]
+    assert len(items) == 1
+    assert "第一章" in items[0]["title"]
+
+
+async def test_mark_all_as_read_type(client: AsyncClient):
+    """mark-all-as-read 的 type 参数只标对应类型"""
+    h = await _register(client)
+    await _subscribe(client, h)
+
+    # 同名 folder + tag
+    await client.post(
+        f"{BASE}/enable-tag",
+        data={"s": "user/-/label/科技", "type": "folder"},
+        headers=h,
+    )
+    await client.post(
+        f"{BASE}/enable-tag",
+        data={"s": "user/-/label/科技", "type": "tag"},
+        headers=h,
+    )
+    r = await client.get(f"{BASE}/subscription/list", headers=h)
+    feed_id = r.json()["subscriptions"][0]["id"]
+    await client.post(
+        f"{BASE}/subscription/edit",
+        data={"ac": "edit", "s": feed_id, "a": "user/-/label/科技"},
+        headers=h,
+    )
+
+    ids = await _title_to_id(client, h)
+    entry1 = ids["《炒饭指南》第一章"]
+    await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": entry1, "a": "user/-/label/科技"},
+        headers=h,
+    )
+
+    # 只标 tag 下条目已读
+    r = await client.post(
+        f"{BASE}/mark-all-as-read",
+        data={"s": "user/-/label/科技", "type": "tag"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+    # tag 流下的条目应已读
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/label/科技",
+        params={"type": "tag"},
+        headers=h,
+    )
+    items = r.json()["items"]
+    assert "user/-/state/com.google/read" in items[0]["categories"]

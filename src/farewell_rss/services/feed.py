@@ -3,7 +3,7 @@ from datetime import datetime
 
 from ..db.models import Entry, Feed
 from ..db.repositories.feed import FeedRepository
-from ..feed_fetcher.feed_fetcher import fetch
+from ..feed_fetcher.feed_fetcher import FetchError, fetch
 from .entry import EntryService
 
 _logger = logging.getLogger(__name__)
@@ -27,7 +27,10 @@ class FeedService:
         return await self._repository.list_()
 
     async def insert_by_href(self, href: str) -> Feed | None:
-        feed = await fetch(href)
+        try:
+            feed = await fetch(href)
+        except FetchError:
+            return None
         if feed:
             _logger.info("已从 %s 获取订阅源 %s", href, feed.title)
             return await self._repository.upsert(feed)
@@ -35,12 +38,18 @@ class FeedService:
         return None
 
     async def update(self, feed: Feed) -> Feed | None:
-        updated_feed = await fetch(feed.href)
+        try:
+            updated_feed = await fetch(
+                feed.href, etag=feed.etag, modified=feed.modified
+            )
+        except FetchError:
+            # 网络失败：不更新时间戳，下一轮 TTL 后重试
+            return None
         if updated_feed:
             _logger.info("已更新订阅源 %s（%s）", updated_feed.title, updated_feed.href)
             return await self._repository.upsert(updated_feed)
-        # 此处不记日志，因为 feed_fetcher 那里已经记录了日志
-        await self._repository.touch(feed.id)  # 更新时间戳，避免重复请求
+        # 304 未修改或没有条目：更新时间戳，避免反复请求
+        await self._repository.touch(feed.id)
         return None
 
     async def prune(self, feed: Feed) -> Feed | None:

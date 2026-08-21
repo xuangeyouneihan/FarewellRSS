@@ -1,0 +1,26 @@
+# 版本控制
+# 注意：.git 不排除——hatch-vcs 要在容器里读 git tag 定版本
+.github
+.gitignore
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+data/
+
+# 前端（node_modules 由 Dockerfile 阶段 1 重新装）
+frontend/node_modules/
+frontend/dist
+
+# 编辑器/系统
+.vscode/
+.idea/
+*.md
+!README.md
+docs/
+test/

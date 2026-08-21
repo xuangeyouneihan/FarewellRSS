@@ -105,6 +105,24 @@ app.include_router(subscriptions_router, prefix="/api/greader.php")
 _logger = logging.getLogger(__name__)
 
 
+def _find_frontend_dist() -> str | None:
+    """按优先级找前端构建产物：包内 static → 项目 frontend/dist"""
+    # 1. 包内（pip 安装时打进来的）
+    pkg_static = os.path.join(os.path.dirname(__file__), "static")
+    if os.path.isfile(os.path.join(pkg_static, "index.html")):
+        return pkg_static
+    # 2. 项目目录 frontend/dist（本地开发/自部署）
+    proj_dist = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
+    )
+    if os.path.isfile(os.path.join(proj_dist, "index.html")):
+        return proj_dist
+    return None
+
+
+_FRONTEND_DIST = _find_frontend_dist()
+
+
 @app.exception_handler(Exception)
 async def _catch_all(request: Request, exc: Exception):
     # API 自己抛出的 HTTPException 不记录日志，其他未处理异常才记录
@@ -113,9 +131,38 @@ async def _catch_all(request: Request, exc: Exception):
     raise exc
 
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
+if _FRONTEND_DIST:
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    # 静态资源（带 hash 的 assets）直接服务
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")),
+        name="assets",
+    )
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa(full_path: str = ""):
+        """SPA fallback：/api 走 API，其余路径返回 index.html（Vue Router history 模式）"""
+        # 兜底：/api 开头但没匹配到 API 路由的，返回 404 而不是 index.html
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
+        # 静态文件（favicon 等在 dist 根目录）存在则直接返回
+        if full_path:
+            candidate = os.path.join(_FRONTEND_DIST, full_path)
+            if os.path.isfile(candidate):
+                return FileResponse(candidate)
+        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
+
+    _logger.info("前端静态文件目录: %s", _FRONTEND_DIST)
+else:
+    _logger.warning("未找到前端构建产物（frontend/dist 或包内 static），仅提供 API")
+
+    @app.get("/")
+    async def root():
+        return {"message": "FarewellRSS API（前端未构建）"}
 
 
 def main() -> None:

@@ -178,6 +178,9 @@ async def edit_subscription(
                 if not subscription:
                     continue
                 title = ts[i] if i < len(ts) and ts[i] else None
+                if title is None:
+                    # 未提供 t 时保留原自定义标题，避免归类/移动操作误清空标题
+                    title = subscription.title
                 folder_id = None
                 if not r:
                     folder_id = subscription.folder_id
@@ -202,19 +205,24 @@ async def quickadd_subscription(
     subscription_service: Annotated[
         SubscriptionService, Depends(get_subscription_service)
     ],
-    label_service: Annotated[LabelService, Depends(get_label_service)],
     feed_service: Annotated[FeedService, Depends(get_feed_service)],
     quickadd: Annotated[str, Form()],
 ):
     """快速添加订阅"""
     try:
-        await edit_subscription(
-            ac=_SubscriptionEditAction.SUBSCRIBE,
-            s=[f"feed/{quickadd}"],
+        if not quickadd.startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "InvalidSubscribeFeedId",
+                    "detail": "订阅时订阅 ID 中的 feed 部分必须是 URL",
+                },
+            )
+        # 直接订阅并拿回 Subscription；不要用原始 URL 反查，feedparser 解析出的
+        # href 可能是重定向后的最终地址，与用户输入不一致
+        subscription = await subscription_service.subscribe(
             user=user,
-            subscription_service=subscription_service,
-            label_service=label_service,
-            feed_service=feed_service,
+            feed_href=quickadd,
         )
     except HTTPException as e:
         _logger.warning(
@@ -268,31 +276,28 @@ async def quickadd_subscription(
             },
         )
     else:
-        feed = await feed_service.get_by_href(quickadd)
-        subscription = await subscription_service.get(user, feed=feed) if feed else None
-        if subscription:
+        feed = await feed_service.get(subscription.feed_id)
+        if feed:
             return {
                 "numResults": 1,
                 "query": feed.href,
                 "streamId": f"feed/{subscription.feed_id}",
                 "streamName": subscription.title or feed.title or "",
             }
-        else:
-            _logger.error(
-                "用户 %s（%d）快速添加订阅 %s 后未能确认，feed=%s subscription=%s",
-                user.username,
-                user.id,
-                quickadd,
-                feed,
-                subscription,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={
-                    "numResults": 0,
-                    "error": {
-                        "code": "QuickAddFailed",
-                        "detail": f"无法添加订阅: {quickadd}",
-                    },
+        _logger.error(
+            "用户 %s（%d）快速添加订阅 %s 后未能确认订阅源，subscription=%s",
+            user.username,
+            user.id,
+            quickadd,
+            subscription,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "numResults": 0,
+                "error": {
+                    "code": "QuickAddFailed",
+                    "detail": f"无法添加订阅: {quickadd}",
                 },
-            )
+            },
+        )

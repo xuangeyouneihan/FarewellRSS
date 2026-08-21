@@ -59,11 +59,9 @@ async def edit_tag(
 ) -> Response:
     """编辑标签"""
     entry_ids = parse_item_ids(i)
-    entries = [
-        e
-        for eid in entry_ids
-        if (e := (await entry_service.get_batch(entry_ids)).get(eid)) is not None
-    ]
+    # 批量查询只调一次，避免在循环内反复全量查询（O(n²) 次数据库往返）
+    entry_map = await entry_service.get_batch(entry_ids)
+    entries = [e for eid in entry_ids if (e := entry_map.get(eid)) is not None]
 
     for entry in entries:
         for label_name in a or []:
@@ -376,7 +374,7 @@ async def mark_all_as_read(
     label_service: Annotated[LabelService, Depends(get_label_service)],
     read_batch_service: Annotated[ReadBatchService, Depends(get_read_batch_service)],
     s: Annotated[str, Form()],
-    tag: Annotated[bool, Form()] = False,
+    type: Annotated[LabelType | None, Form()] = None,
     ts: Annotated[str | None, Form()] = None,
 ) -> Response:
     """将流下的所有文章标记为已读"""
@@ -427,9 +425,13 @@ async def mark_all_as_read(
         await read_batch_service.insert_by_subscription(subscription, older_than_id)
     elif s.startswith("user/-/label/"):
         label = None
-        if tag:
+        if type == LabelType.TAG:
             label = await label_service.get_by_user_name_type(
                 user, s[13:], LabelType.TAG
+            )
+        elif type == LabelType.FOLDER:
+            label = await label_service.get_by_user_name_type(
+                user, s[13:], LabelType.FOLDER
             )
         else:
             label = await label_service.get_by_user_name_type(

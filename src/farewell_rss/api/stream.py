@@ -41,8 +41,36 @@ FILTERING_MAP = {
 router = APIRouter(prefix="/reader/api/0", tags=["stream"])
 
 
+def _entry_sort_key(entry: Entry) -> tuple[int, int]:
+    """排序键：(有效时间戳秒, id)。
+
+    有效时间 = published > updated > fetched（与 repository 的 coalesce 一致）。
+    id 作为次级键，保证同一秒内条目的排序与分页稳定。
+    """
+    effective = entry.published or entry.updated or entry.fetched
+    return (int(effective.timestamp()), entry.id)
+
+
+def _encode_continuation(entry: Entry) -> str:
+    """continuation = 16 位 hex 时间戳 + 16 位 hex id（共 32 位 hex）"""
+    ts, id_ = _entry_sort_key(entry)
+    return f"{ts:016x}{id_:016x}"
+
+
+def _decode_continuation(c: str) -> tuple[int, int] | None:
+    """解析 continuation；格式不符时返回 None（视为无分页锚点）"""
+    c = c.strip()
+    if len(c) != 32:
+        return None
+    try:
+        return (int(c[:16], 16), int(c[16:], 16))
+    except ValueError:
+        return None
+
+
 async def _resolve_stream(
     s: str,
+    type: LabelType | None,
     user: User,
     ot: int | None,
     nt: int | None,
@@ -55,6 +83,7 @@ async def _resolve_stream(
     feed_service: FeedService,
     subscription_service: SubscriptionService,
     label_service: LabelService,
+    star_state_service: StarStateService,
     entry_service: EntryService,
 ) -> tuple[list[Entry], str | None]:
     """解析流路径并返回分页后的条目列表和 continuation"""
@@ -82,6 +111,11 @@ async def _resolve_stream(
                 include=Filtering.STARRED,
                 exclude=None,
             )
+        case "user/-/state/farewell-rss/starred-uncategorized":
+            star_states = await star_state_service.list_uncategorized(user)
+            if star_states:
+                entry_ids = [ss.entry_id for ss in star_states]
+                raw_entries = list((await entry_service.get_batch(entry_ids)).values())
         case f if f.startswith("feed/"):
             feed = await feed_service.get(int(f[5:]))
             if not feed:
@@ -103,13 +137,22 @@ async def _resolve_stream(
                 exclude=exclude,
             )
         case l if l.startswith("user/-/label/"):
-            label = await label_service.get_by_user_name_type(
-                user, l[13:], LabelType.FOLDER
-            )
-            if not label:
+            if type == LabelType.TAG:
                 label = await label_service.get_by_user_name_type(
                     user, l[13:], LabelType.TAG
                 )
+            elif type == LabelType.FOLDER:
+                label = await label_service.get_by_user_name_type(
+                    user, l[13:], LabelType.FOLDER
+                )
+            else:
+                label = await label_service.get_by_user_name_type(
+                    user, l[13:], LabelType.FOLDER
+                )
+                if not label:
+                    label = await label_service.get_by_user_name_type(
+                        user, l[13:], LabelType.TAG
+                    )
             if not label:
                 _logger.warning(
                     "用户 %s（%d）尝试获取文件夹/标签 %s 下的条目时，未找到该文件夹/标签",
@@ -148,23 +191,22 @@ async def _resolve_stream(
                 detail={"code": "InvalidStreamID", "detail": f"无效的流 ID: {s}"},
             )
 
-    if r == Sorting.OLDEST_FIRST:
-        raw_entries.sort(key=lambda e: e.id)
-    else:
-        raw_entries.sort(key=lambda e: e.id, reverse=True)
+    raw_entries.sort(
+        key=_entry_sort_key,
+        reverse=(r != Sorting.OLDEST_FIRST),
+    )
 
     if c:
-        cursor = int(c, 16)  # 此处 FreshRSS 的实现是接收十进制
-        if r == Sorting.OLDEST_FIRST:
-            raw_entries = [e for e in raw_entries if e.id > cursor]
-        else:
-            raw_entries = [e for e in raw_entries if e.id < cursor]
+        cursor = _decode_continuation(c)
+        if cursor is not None:
+            if r == Sorting.OLDEST_FIRST:
+                raw_entries = [e for e in raw_entries if _entry_sort_key(e) > cursor]
+            else:
+                raw_entries = [e for e in raw_entries if _entry_sort_key(e) < cursor]
 
     continuation = None
     if len(raw_entries) > n:
-        continuation = (
-            f"{raw_entries[n - 1].id:016x}"  # 此处 FreshRSS 的实现是返回十进制
-        )
+        continuation = _encode_continuation(raw_entries[n - 1])
         raw_entries = raw_entries[:n]
 
     return raw_entries, continuation
@@ -214,10 +256,14 @@ async def _build_items(
 
         items.append({
             "id": f"tag:google.com,2005:reader/item/{entry.id:016x}",
-            "crawlTimeMsec": str(int(entry.fetched.timestamp() * 1000)),
-            "timestampUsec": str(entry.id),
-            "published": int((entry.published or entry.updated or entry.fetched).timestamp()),
-            "updated": int((entry.updated or entry.published or entry.fetched).timestamp()),
+            "crawlTimeMsec": str(int(entry.fetched.timestamp() * 1e3)),
+            "timestampUsec": str(int(entry.fetched.timestamp() * 1e6)),
+            "published": int(
+                (entry.published or entry.updated or entry.fetched).timestamp()
+            ),
+            "updated": int(
+                (entry.updated or entry.published or entry.fetched).timestamp()
+            ),
             "title": entry.title,
             "canonical": [{"href": entry.link}] if entry.link else [],
             "alternate": [{"href": entry.link, "type": "text/html"}]
@@ -256,12 +302,18 @@ async def stream_contents(
     ] = Sorting.NEWEST_FIRST_ALT,  # 排序方式，n 和 d 表示按时间降序，o 表示按时间升序
     ot: Annotated[int | None, Query()] = None,  # 仅返回指定时间戳之后的条目，单位为秒
     nt: Annotated[int | None, Query()] = None,  # 仅返回指定时间戳之前的条目，单位为秒
-    c: Annotated[str | None, Query()] = None,  # 分页锚点，上一页最后一条的 ID
+    c: Annotated[
+        str | None, Query()
+    ] = None,  # 分页锚点：16 位 hex 时间戳 + 16 位 hex id
     xt: Annotated[str | None, Query()] = None,  # 排除指定标签的条目
     it: Annotated[str | None, Query()] = None,  # 仅包含指定标签的条目
+    type: Annotated[
+        LabelType | None, Query()
+    ] = None,  # label 流类型：folder/tag，不传 = FOLDER 优先
 ) -> dict:
     entries, continuation = await _resolve_stream(
         s=s,
+        type=type,
         user=user,
         ot=ot,
         nt=nt,
@@ -274,6 +326,7 @@ async def stream_contents(
         feed_service=feed_service,
         subscription_service=subscription_service,
         label_service=label_service,
+        star_state_service=star_state_service,
         entry_service=entry_service,
     )
     items = await _build_items(
@@ -301,20 +354,27 @@ async def stream_items_ids(
         SubscriptionService, Depends(get_subscription_service)
     ],
     label_service: Annotated[LabelService, Depends(get_label_service)],
+    star_state_service: Annotated[StarStateService, Depends(get_star_state_service)],
     entry_service: Annotated[EntryService, Depends(get_entry_service)],
     s: Annotated[str, Query()],  # 流 ID，如 user/-/state/com.google/reading-list
+    type: Annotated[
+        LabelType | None, Query()
+    ] = None,  # label 流类型：folder/tag，不传 = FOLDER 优先
     n: Annotated[int, Query(ge=1)] = 1000,  # 返回的最大条目数
     r: Annotated[
         Sorting, Query()
     ] = Sorting.NEWEST_FIRST_ALT,  # 排序方式，n 和 d 表示按时间降序，o 表示按时间升序
     ot: Annotated[int | None, Query()] = None,  # 仅返回指定时间戳之后的条目，单位为秒
     nt: Annotated[int | None, Query()] = None,  # 仅返回指定时间戳之前的条目，单位为秒
-    c: Annotated[str | None, Query()] = None,  # 分页锚点，上一页最后一条的 ID
+    c: Annotated[
+        str | None, Query()
+    ] = None,  # 分页锚点：16 位 hex 时间戳 + 16 位 hex id
     xt: Annotated[str | None, Query()] = None,  # 排除指定标签的条目
     it: Annotated[str | None, Query()] = None,  # 仅包含指定标签的条目
 ) -> dict:
     entries, continuation = await _resolve_stream(
         s=s,
+        type=type,
         user=user,
         ot=ot,
         nt=nt,
@@ -327,6 +387,7 @@ async def stream_items_ids(
         feed_service=feed_service,
         subscription_service=subscription_service,
         label_service=label_service,
+        star_state_service=star_state_service,
         entry_service=entry_service,
     )
     result: dict = {

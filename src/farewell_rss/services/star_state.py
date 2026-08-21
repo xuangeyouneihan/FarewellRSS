@@ -27,6 +27,9 @@ class StarStateService:
     async def list_by_tag(self, tag_id: int) -> list[StarState]:
         return await self._repository.list_by_tag(tag_id)
 
+    async def list_uncategorized(self, user: User) -> list[StarState]:
+        return await self._repository.list_uncategorized(user.id)
+
     async def upsert(
         self,
         user: User,

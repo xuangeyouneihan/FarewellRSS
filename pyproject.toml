@@ -35,6 +35,10 @@ dev-mode-dirs = ["src"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/farewell_rss"]
 
+# 把前端构建产物打进包（打包前先 cd frontend && pnpm build）
+[tool.hatch.build.targets.wheel.force-include]
+"frontend/dist" = "src/farewell_rss/static"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 

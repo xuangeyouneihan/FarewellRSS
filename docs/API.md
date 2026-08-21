@@ -1,5 +1,7 @@
 # 告别 RSS Google Reader API 文档
 
+> 简体中文 | [English](../i18n/docs-en/API.md)
+
 ## 概述
 
 告别 RSS 实现了 Google Reader API，基于 FreshRSS 的 `greader.php` 作为参考实现。API 的 Google Reader 兼容端点基础路径为 `/reader/api/0/`，认证及账户管理端点路径为 `/accounts/`。通过以下前缀均可访问：
@@ -42,14 +44,96 @@
 | `Email`         | 用户名（必填） |
 | `Password`      | 密码（必填）   |
 | `friendly_name` | 昵称（可选）   |
+| `invite_code`   | 邀请码（配置了 `FAREWELL_RSS_INVITE_CODE` 时必填） |
+
+注册受环境变量控制：`FAREWELL_RSS_ALLOW_REGISTER` 为假时拒绝（403 `RegisterDisabledError`）；允许时若配置了 `FAREWELL_RSS_INVITE_CODE`，`invite_code` 不匹配则拒绝（403 `InvalidInviteCodeError`）。详见[环境变量文档](ENVIRONMENT.md)。
 
 > **扩展端点**，Google Reader API 和 FreshRSS 均无此端点。
 
-### DeleteAccount (DELETE)
+### DeleteAccount (POST)
 
-`DELETE /accounts/DeleteAccount?username=x`
+`POST /accounts/DeleteAccount`
 
-删除账户。用户可删除自己，管理员可删除其他用户。最后一个管理员不可删除（返回 422）。
+| 参数                | 说明           |
+| ------------------- | -------------- |
+| `username`          | 要删除的用户名 |
+| `operator_username` | 操作者用户名   |
+| `operator_password` | 操作者密码     |
+
+删除账户。本人删除自己时，`operator_password` 为自己的密码；管理员删除其他用户时，`operator_password` 为管理员自己的密码。最后一个管理员不可删除（返回 422）。操作者凭证错误返回 400，非管理员删除他人返回 403，目标用户不存在返回 404。
+
+> **扩展端点**。
+
+### ChangePassword (POST)
+
+`POST /accounts/ChangePassword`
+
+| 参数                | 说明               |
+| ------------------- | ------------------ |
+| `username`          | 要修改密码的用户名 |
+| `new_password`      | 新密码             |
+| `operator_username` | 操作者用户名       |
+| `operator_password` | 操作者密码         |
+
+修改密码。本人修改自己时，`operator_password` 为旧密码；管理员修改其他用户时，`operator_password` 为管理员自己的密码。操作者凭证错误返回 400，非管理员修改他人返回 403，目标用户不存在返回 404。
+
+> **扩展端点**。
+
+### EditProfile (POST)
+
+`POST /accounts/EditProfile`
+
+需认证（`Authorization` 头），修改当前登录用户的个人资料。
+
+| 参数              | 说明                                   |
+| ----------------- | -------------------------------------- |
+| `friendly_name` | 昵称。缺省或空白 → 置空（不是保留原值） |
+
+> **扩展端点**。当前仅支持修改昵称。注意：空值语义是「置空」，要保留原昵称请不要调用本端点。
+
+### SetAdmin (POST)
+
+`POST /accounts/SetAdmin`
+
+| 参数                | 说明                     |
+| ------------------- | ------------------------ |
+| `username`          | 目标用户名               |
+| `is_admin`          | `true`/`false`         |
+| `operator_username` | 操作者用户名（须管理员） |
+| `operator_password` | 操作者密码               |
+
+设置/取消管理员。仅管理员可操作（非管理员 403）。不允许取消最后一个管理员（422）。操作者凭证错误返回 400，目标用户不存在返回 404。
+
+> **扩展端点**。
+
+### CreateUser (POST)
+
+`POST /accounts/CreateUser`
+
+| 参数                | 说明                     |
+| ------------------- | ------------------------ |
+| `username`          | 新用户名                 |
+| `password`          | 初始密码（不能为空）     |
+| `friendly_name`     | 昵称（可选）             |
+| `is_admin`          | 是否管理员（可选，默认 false） |
+| `operator_username` | 操作者用户名（须管理员） |
+| `operator_password` | 操作者密码               |
+
+管理员直接创建用户，**不受** `FAREWELL_RSS_ALLOW_REGISTER` / `FAREWELL_RSS_INVITE_CODE` 限制。成功返回 201。空密码 400，非管理员 403，用户名已存在 409，操作者凭证错误 400。
+
+> **扩展端点**。
+
+### ListUsers (GET)
+
+`GET /accounts/ListUsers`
+
+需认证，仅管理员（非管理员 403）。返回：
+
+```json
+{"users": [{"username": "...", "friendlyName": "...", "isAdmin": true}]}
+```
+
+不含已删除（软删除）的用户。
 
 > **扩展端点**。
 
@@ -64,12 +148,15 @@
 | 参数   | 说明                               |
 | ------ | ---------------------------------- |
 | `n`  | 返回条目数（默认 20）              |
-| `r`  | 排序：`n`/`d` 降序，`o` 升序 |
+| `r`  | 排序：`n`/`d` 降序，`o` 升序（按条目有效时间戳 + id） |
 | `ot` | 起始时间戳（秒）                   |
 | `nt` | 结束时间戳（秒）                   |
-| `c`  | 分页 continuation（hex）           |
+| `c`  | 分页 continuation（32 位 hex：16 位时间戳 + 16 位 id） |
 | `xt` | 排除标签                           |
 | `it` | 仅含标签                           |
+| `type` | `folder`/`tag`，指定 `user/-/label/{name}` 的类型，不传 = FOLDER 优先 |
+
+> **参数作用域**：`type` 仅对路径参数 `{path}`（流 ID）起效；`it`/`xt` 目前只支持 `read`、`unread`、`starred` 三个状态标签，尚不支持 `user/-/label/{name}`。
 
 支持的流路径：
 
@@ -77,13 +164,16 @@
 | ---------------------------------------- | -------------------------- |
 | `user/-/state/com.google/reading-list` | 全部                       |
 | `user/-/state/com.google/starred`      | 已收藏                     |
+| `user/-/state/farewell-rss/starred-uncategorized` | 未分类收藏（扩展）     |
 | `feed/{id}`                            | 单个订阅源                 |
 | `user/-/label/{name}`                  | 文件夹/标签（FOLDER 优先） |
 | `user/-/search/{query}`                | FTS5 全文搜索（扩展）      |
 
 > **搜索流说明**：`user/-/search/{query}` 使用 SQLite FTS5 全文搜索，支持布尔表达式（`python OR go`）、短语（`"hello world"`）、列限定（`title:python`）。搜索结果按相关性（BM25）排序，`r` 参数被忽略。分页通过 `n`（limit）和 `c`（continuation = offset 的 hex）控制，与普通流兼容。
 
-> **与 Google Reader 和 FreshRSS 的差异**：continuation 使用 hex 格式（Google Reader 标准），FreshRSS 使用十进制。告别 RSS 采用 hex。告别 RSS 新增搜索流以支持全文搜索。
+> **排序与分页说明**：条目按「有效时间戳」（`published > updated > fetched` 取其一，秒级）+ 自增 id 排序；`o` 为时间升序（最旧在前），`n`/`d` 为降序（最新在前）。continuation 为 32 位 hex，前 16 位是排序时间戳、后 16 位是条目 id，作为复合分页锚点——同一秒有多条时按 id 精确切分，不重不漏。搜索流除外（见下）。
+>
+> **与 Google Reader 和 FreshRSS 的差异**：continuation 使用 hex 格式（Google Reader 标准），FreshRSS 使用十进制；告别 RSS 采用 hex，并额外携带「时间戳 + id」复合锚点。告别 RSS 新增搜索流以支持全文搜索。
 
 ### stream/items/ids
 
@@ -176,7 +266,7 @@
 >
 > - Google Reader 不区分 folder 和 tag，文件夹下订阅源的所有条目自动继承同名标签。实际上用户给订阅源打标签归类和单独给某个条目打标签记住并归类完全是两个目的，强行将二者混为一谈就是纯傻逼设计
 > - 告别 RSS 的 TAG 依附于 StarState——有 tag 必收藏，一个条目只能有一个 tag。这是收藏夹分类的设计，而非自由标签系统。一个条目多个 tag 写起来多少有点麻烦，而且没太大必要
-> - 同名 folder 和 tag 可以共存，FOLDER 优先匹配；部分端点新增 `type` 或 `tag` 参数以精确区分
+> - 同名 folder 和 tag 可以共存，FOLDER 优先匹配；部分端点新增 `type` 参数以精确区分
 
 ### tag/list
 
@@ -260,7 +350,7 @@
 | ------- | ------------------------------------------ |
 | `s`   | 流 ID                                      |
 | `ts`  | 条目 ID（之前的全部标已读）                |
-| `tag` | 指定`s` 中 label 为 TAG 类型（扩展参数） |
+| `type` | 指定`s` 中 label 类型：`folder`/`tag`，不传 = FOLDER 优先（扩展参数） |
 | `T`   | token                                      |
 
 支持的 `s` 值：`feed/{id}`、`user/-/label/{name}`、`reading-list`、`starred`。
@@ -283,16 +373,17 @@
 
 ## 与 Google Reader / FreshRSS 的主要差异汇总
 
-| 特性                      | Google Reader | FreshRSS            | 告别 RSS          |
+| 特性                      | Google Reader | FreshRSS            | 告别 RSS             |
 | ------------------------- | ------------- | ------------------- | -------------------- |
 | 认证方式                  | Google OAuth  | SHA1 + salt         | HMAC-SHA256 + bcrypt |
-| Continuation 格式         | hex           | 十进制              | hex                  |
+| Continuation 格式         | hex           | 十进制              | hex（时间戳 + id 复合） |
 | 标签系统                  | 扁平 tags     | Category + Tag 分离 | Folder + Tag 分离    |
 | Folder/Tag 同名           | N/A           | FOLDER 遮蔽 TAG     | FOLDER 优先，可指定  |
 | 批量 rename-tag           | 不支持        | 不支持              | 支持（含互换）       |
 | enable-tag                | 无            | 无                  | 支持                 |
-| ClientRegister            | 无            | 无                  | 支持                 |
+| ClientRegister            | 无            | 无                  | 支持（可配注册开关/邀请码） |
 | DeleteAccount             | 无            | 无                  | 支持                 |
+| EditProfile / SetAdmin / CreateUser / ListUsers | 无 | 无         | 支持                 |
 | OPML 导出                 | N/A           | 支持                | 支持                 |
 | OPML 导入                 | N/A           | 支持                | 支持                 |
 | mark-all-as-read 已读保护 | -             | 覆盖已读            | 跳过已读             |

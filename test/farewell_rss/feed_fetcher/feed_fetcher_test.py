@@ -3,12 +3,14 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import feedparser
+import pytest
 
 from farewell_rss.feed_fetcher.feed_fetcher import (
     FetchedAuthor,
     FetchedEnclosure,
     FetchedFeed,
     FetchedTag,
+    FetchError,
     _parse_author,
     _parse_datetime,
     _parse_enclosure,
@@ -228,11 +230,11 @@ class TestFetchEdgeCases:
         assert result is None
 
     async def test_network_error(self):
-        """网络异常应返回 None"""
+        """网络异常应抛 FetchError"""
 
         async def fake_to_thread(func, *args, **kwargs):
             raise OSError("连接超时")
 
-        with patch("asyncio.to_thread", fake_to_thread):
-            result = await fetch("https://example.com/dead.xml")
-        assert result is None
+        with patch("asyncio.to_thread", fake_to_thread):  # noqa: SIM117
+            with pytest.raises(FetchError):
+                await fetch("https://example.com/dead.xml")

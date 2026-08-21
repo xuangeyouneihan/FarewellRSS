@@ -71,8 +71,15 @@ async def init_db() -> None:
 
 
 async def get_session():
-    async with SessionLocal() as session:  # noqa: SIM117
-        # 事务上下文管理器，自动提交或回滚
-        # 读操作空提交就空提交吧，反正是自部署，数据库就在本地，空提交也快
-        async with session.begin():
+    async with SessionLocal() as session:
+        # 注意：repository 内部会自行 commit()（如 feed/subscription 的 upsert）。
+        # 因此这里不能再用 session.begin() 包裹，否则 repository 的 commit() 会
+        # 提前关闭显式事务，导致同一请求内后续的 session 操作报
+        # "Can't operate on closed transaction inside context manager"。
+        try:
             yield session
+            # 请求结束时兜底提交（读操作的空提交也走这里，本地 SQLite 空提交代价可忽略）
+            await session.commit()
+        except BaseException:
+            await session.rollback()
+            raise

@@ -60,6 +60,15 @@ class StarStateRepository:
         )
         return list(result.scalars().all())
 
+    async def list_uncategorized(self, user_id: int) -> list[StarState]:
+        _logger.debug("列出用户 %d 的未分类收藏", user_id)
+        result = await self._session.execute(
+            select(StarState).where(
+                StarState.user_id == user_id, StarState.tag_id.is_(None)
+            )
+        )
+        return list(result.scalars().all())
+
     async def upsert(
         self,
         user_id: int,
