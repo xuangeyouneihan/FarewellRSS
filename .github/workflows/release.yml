@@ -48,6 +48,11 @@ jobs:
       - name: Build Python package
         run: uv build
 
+      - name: Attach the Python wheel to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+
       - name: Publish to PyPI
         run: uv publish --token "${{ secrets.PYPI_API_TOKEN }}"
 

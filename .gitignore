@@ -157,12 +157,6 @@ ENV/
 env.bak/
 venv.bak/
 
-# Application data
-data/
-*.db
-*.db-shm
-*.db-wal
-
 # Spyder project settings
 .spyderproject
 .spyproject
