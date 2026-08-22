@@ -40,29 +40,65 @@ The backend communicates with the frontend entirely through the Google Reader AP
 
 All configuration is done through `FAREWELL_RSS_*` environment variables (data directory, port, registration toggle, invite codes, fetch scheduling, etc.). OS environment variables take precedence over the `.env` file in the data directory. See [ENVIRONMENT.md](ENVIRONMENT.md) for details.
 
-## Running
+## Building
 
-### Local
+### Local build
 
 ```sh
-uv sync                                  # create the environment and install backend/dev dependencies
 cd frontend
 pnpm install
 pnpm build                               # build the frontend (first time or after changes)
 cd ..
+uv sync                                  # create the environment and install backend/dev dependencies
+uv build                                  # build the wheel and source distribution
+```
+
+To run from the local source tree:
+
+```sh
 uv run farewell-rss                      # start backend and frontend with one command (port 3000 by default)
 ```
 
-Open `http://localhost:3000` in your browser. For frontend development with hot reload, use `cd frontend && pnpm dev` (port 5173, proxied to 3000).
+For frontend development with hot reload, use `cd frontend && pnpm dev` (port 5173, proxied to 3000).
 
-### Docker
+### Local Docker build
 
 ```sh
 docker build -t farewell-rss .
+```
+
+## Running
+
+### Docker Hub
+
+```sh
+docker run -d -p 3000:3000 -v farewell-rss-data:/data \
+  xuangeyouneihan/farewell-rss:latest
+```
+
+You can also run the locally built image:
+
+```sh
 docker run -d -p 3000:3000 -v farewell-rss-data:/data farewell-rss
 ```
 
 Or `docker compose up -d`. The image defaults to `FAREWELL_RSS_DATA_DIR=/data` (persisted via volume mount); override the other settings with environment variables (see above). Open `http://localhost:3000`.
+
+### PyPI
+
+Install the command for persistent use with uv (recommended):
+
+```sh
+uv tool install farewell-rss
+farewell-rss
+```
+
+You can also install it into the current Python environment:
+
+```sh
+pip install farewell-rss
+farewell-rss
+```
 
 ## Roadmap
 

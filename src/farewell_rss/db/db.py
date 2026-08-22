@@ -6,7 +6,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 _logger = logging.getLogger(__name__)
 
-DATA_DIR = os.getenv("FAREWELL_RSS_DATA_DIR", "data")
+DATA_DIR = os.path.expanduser(
+    os.getenv("FAREWELL_RSS_DATA_DIR", "~/.local/share/farewell-rss")
+)
 _logger.info("数据目录: %s", DATA_DIR)
 
 db_path = os.path.join(DATA_DIR, "farewell_rss.db")

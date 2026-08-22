@@ -40,29 +40,65 @@
 
 所有配置通过 `FAREWELL_RSS_*` 环境变量完成（数据目录、端口、注册开关、邀请码、抓取调度等），OS 环境变量优先于数据目录下的 `.env`。详见 [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)。
 
-## 运行
+## 构建
 
-### 本地
+### 本地构建
 
 ```sh
-uv sync                                  # 创建环境并安装后端及开发依赖
 cd frontend
 pnpm install
 pnpm build                               # 构建前端（首次或有改动时）
 cd ..
+uv sync                                  # 创建环境并安装后端及开发依赖
+uv build                                  # 构建 wheel 和源码包
+```
+
+使用本地源码运行：
+
+```sh
 uv run farewell-rss                      # 一条命令同时起前后端（默认 3000 端口）
 ```
 
-浏览器开 `http://localhost:3000`。前端开发热更新用 `cd frontend && pnpm dev`（5173 端口，代理到 3000）。
+前端开发热更新用 `cd frontend && pnpm dev`（5173 端口，代理到 3000）。
 
-### Docker
+### Docker 本地构建
 
 ```sh
 docker build -t farewell-rss .
+```
+
+## 运行
+
+### Docker Hub
+
+```sh
+docker run -d -p 3000:3000 -v farewell-rss-data:/data \
+  xuangeyouneihan/farewell-rss:latest
+```
+
+也可以使用本地构建的镜像：
+
+```sh
 docker run -d -p 3000:3000 -v farewell-rss-data:/data farewell-rss
 ```
 
 或 `docker compose up -d`。镜像内默认 `FAREWELL_RSS_DATA_DIR=/data`（挂卷持久化），其余配置用环境变量覆盖（见上文）。打开 `http://localhost:3000`。
+
+### PyPI
+
+使用 uv 安装为长期可用的命令（推荐）：
+
+```sh
+uv tool install farewell-rss
+farewell-rss
+```
+
+也可以安装到当前 Python 环境：
+
+```sh
+pip install farewell-rss
+farewell-rss
+```
 
 ## 画饼
 

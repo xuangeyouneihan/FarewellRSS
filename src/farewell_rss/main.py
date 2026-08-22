@@ -50,7 +50,9 @@ def _env_upsert_line(path: str, key: str, value: str) -> None:
 _os_keys = set(os.environ.keys())  # 拍照，趁我们还没往里写东西
 
 # 数据目录由 OS 环境变量决定（Docker ENV / 命令行），不从 .env 读取
-DATA_DIR = os.getenv("FAREWELL_RSS_DATA_DIR", "data")
+DATA_DIR = os.path.expanduser(
+    os.getenv("FAREWELL_RSS_DATA_DIR", "~/.local/share/farewell-rss")
+)
 DATA_DIR = os.path.abspath(DATA_DIR)
 os.makedirs(DATA_DIR, exist_ok=True)
 os.environ["FAREWELL_RSS_DATA_DIR"] = DATA_DIR

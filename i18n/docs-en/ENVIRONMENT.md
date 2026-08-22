@@ -18,7 +18,7 @@ OS environment variables  >  .env file in the data directory
 
 | Variable                  | Default                   | Description                                                                                                                                                  |
 | ------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `FAREWELL_RSS_DATA_DIR` | `data`                  | Data directory (SQLite database, `.env`, etc. all live here). **Read only from OS environment variables**, not from `.env` (because `.env` itself is in this directory). |
+| `FAREWELL_RSS_DATA_DIR` | `~/.local/share/farewell-rss` | Data directory (SQLite database, `.env`, etc. all live here). `~` expands to the current user's home directory. **Read only from OS environment variables**, not from `.env` (because `.env` itself is in this directory). |
 | `FAREWELL_RSS_SECRET`   | Auto-generated on startup | HMAC key used to sign Auth tokens. **If absent, a random value is automatically generated and written to `.env`** — no manual configuration needed. Changing it immediately invalidates the tokens of all logged-in users. |
 | `FAREWELL_RSS_HOST`     | `0.0.0.0`               | Listen address.                                                                                                                                              |
 | `FAREWELL_RSS_PORT`     | `3000`                  | Listen port. Under Docker this is the **container-internal** port; external access is mapped via `docker run -p host:container` (or compose `ports`), and the two must match. |
