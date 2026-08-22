@@ -27,12 +27,6 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install backend dependencies
-        run: uv sync --dev --index-url https://pypi.org/simple
-
-      - name: Run backend tests
-        run: uv run pytest test/ -q
-
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -52,6 +46,12 @@ jobs:
       - name: Run frontend checks
         working-directory: frontend
         run: pnpm build
+
+      - name: Install backend dependencies
+        run: uv sync --dev --index-url https://pypi.org/simple
+
+      - name: Run backend tests
+        run: uv run pytest test/ -q
 
       - name: Build Python package
         run: uv build
