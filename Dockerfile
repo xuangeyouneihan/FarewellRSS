@@ -1,18 +1,54 @@
 # syntax=docker/dockerfile:1
 
-# Docker 镜像使用已发布到 PyPI 的包，避免在镜像构建时依赖源码或 Git 元数据。
+# ─── 阶段 1：构建前端 ────────────────────────────────────────────
+FROM node:22-alpine AS frontend
+
+RUN corepack enable
+
+WORKDIR /build/frontend
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY frontend/ ./
+RUN pnpm build
+
+
+# ─── 阶段 2：准备 Python 包 ─────────────────────────────────────
+FROM python:3.14-slim AS package
+
+ARG RELEASE=false
+ARG APP_VERSION
+
+WORKDIR /build
+COPY . ./
+COPY --from=frontend /build/frontend/dist ./frontend/dist
+
+# 本地模式使用源码；发布模式只从 PyPI 获取包。
+# 本地版本顺序：APP_VERSION -> Git 自动判断 -> hatch-vcs fallback-version。
+RUN if [ "$RELEASE" = "true" ]; then \
+    if [ -n "$APP_VERSION" ]; then \
+    pip download --no-deps --dest /wheels "farewell-rss==$APP_VERSION"; \
+    else \
+    pip download --no-deps --dest /wheels farewell-rss; \
+    fi; \
+    else \
+    apt-get update && apt-get install -y --no-install-recommends git; \
+    if [ -n "$APP_VERSION" ]; then \
+    SETUPTOOLS_SCM_PRETEND_VERSION="$APP_VERSION" pip wheel . --no-deps --wheel-dir /wheels; \
+    else \
+    pip wheel . --no-deps --wheel-dir /wheels; \
+    fi; \
+    fi
+
+
+# ─── 阶段 3：运行时 ──────────────────────────────────────────────
 FROM python:3.14-slim
 
-# 默认环境变量（只设数据目录，其余用代码里的默认值）
 ENV FAREWELL_RSS_DATA_DIR=/data
 
-# 发布 workflow 传入 release tag 对应的版本；手动构建时默认安装 PyPI 最新版。
-ARG APP_VERSION
-RUN if [ -n "$APP_VERSION" ]; then \
-    pip install --no-cache-dir "farewell-rss==$APP_VERSION"; \
-    else \
-    pip install --no-cache-dir farewell-rss; \
-    fi
+COPY --from=package /wheels/ /tmp/wheels/
+RUN pip install --no-cache-dir /tmp/wheels/farewell_rss-*.whl \
+    && rm -rf /tmp/wheels
 
 # 数据目录（可挂卷持久化）
 RUN mkdir -p /data

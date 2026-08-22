@@ -78,6 +78,7 @@ jobs:
           context: .
           push: true
           build-args: |
+            RELEASE=true
             APP_VERSION=${{ steps.version.outputs.version }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/farewell-rss:${{ steps.version.outputs.version }}
