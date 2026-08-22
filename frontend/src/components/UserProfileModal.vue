@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { NButton, NInput, NModal, useMessage } from "naive-ui";
 import { useAuthStore } from "@/stores/auth";
+import * as greader from "@/api/greader";
 import { t } from "@/i18n";
 
 defineOptions({ name: "UserProfileModal" });
@@ -23,6 +24,7 @@ const changing = ref(false);
 const confirmUsername = ref("");
 const deletePassword = ref("");
 const deleting = ref(false);
+const exportingOpml = ref(false);
 
 const username = computed(() => auth.username);
 const displayName = computed(() => auth.displayName ?? t("noNickname"));
@@ -113,6 +115,25 @@ async function deleteAccount(): Promise<void> {
   }
 }
 
+async function exportOpml(): Promise<void> {
+  exportingOpml.value = true;
+  try {
+    const { blob, filename } = await greader.exportOpml();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename.toLowerCase().endsWith(".opml")
+      ? filename
+      : `${filename.replace(/\.[^./\\]+$/, "")}.opml`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : t("exportOpmlFailed"));
+  } finally {
+    exportingOpml.value = false;
+  }
+}
+
 defineExpose({ open });
 </script>
 
@@ -140,6 +161,17 @@ defineExpose({ open });
         </template>
       </div>
       <div class="username">{{ t("username") }}{{ t("colon") }}{{ username ?? "—" }}</div>
+
+      <div class="section">
+        <n-button
+          size="small"
+          block
+          :loading="exportingOpml"
+          @click="exportOpml"
+        >
+          {{ t("exportOpml") }}
+        </n-button>
+      </div>
 
       <div class="section">
         <h4 class="section-title">{{ t("changePassword") }}</h4>

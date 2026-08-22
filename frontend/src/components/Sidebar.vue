@@ -34,6 +34,8 @@ const dialog = useDialog();
 const showAddModal = ref(false);
 const feedUrl = ref("");
 const adding = ref(false);
+const opmlInput = ref<HTMLInputElement | null>(null);
+const importingOpml = ref(false);
 
 // 新建文件夹 / 收藏夹
 const createModalRef = ref<{ open: (type: LabelType) => void } | null>(null);
@@ -162,6 +164,7 @@ function groupAddMenu() {
   return [
     { label: t("subscriptionItem"), key: "add-subscription" },
     { label: t("category"), key: "create-folder" },
+    { label: t("importOpml"), key: "import-opml" },
   ];
 }
 
@@ -170,6 +173,26 @@ function onGroupAddAction(key: string): void {
     showAddModal.value = true;
   } else if (key === "create-folder") {
     openCreate("folder");
+  } else if (key === "import-opml") {
+    opmlInput.value?.click();
+  }
+}
+
+async function onOpmlSelected(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file || importingOpml.value) return;
+  importingOpml.value = true;
+  const loadingMessage = message.loading(t("importingOpml"), { duration: 0 });
+  try {
+    await subs.importOpml(file);
+    message.success(t("importOpmlSuccess"));
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : t("importOpmlFailed"));
+  } finally {
+    loadingMessage.destroy();
+    importingOpml.value = false;
+    input.value = "";
   }
 }
 
@@ -281,6 +304,13 @@ function subMenu() {
 
 <template>
   <aside class="sidebar">
+    <input
+      ref="opmlInput"
+      class="opml-input"
+      type="file"
+      accept=".opml,.xml,.txt"
+      @change="onOpmlSelected"
+    />
     <nav>
       <ul class="menu">
         <li v-for="s in systemStreams" :key="s.id">
@@ -472,6 +502,10 @@ function subMenu() {
   overflow-y: auto;
   border-right: 1px solid var(--app-border);
   padding: 8px;
+}
+
+.opml-input {
+  display: none;
 }
 
 /* 手机（钻取整页）/ 平板（抽屉内）：占满容器 */

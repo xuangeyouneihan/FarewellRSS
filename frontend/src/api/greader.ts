@@ -240,6 +240,35 @@ export async function quickAdd(feedUrl: string): Promise<QuickAddResult> {
   return response.json()
 }
 
+/** 导入 OPML（后端接收原始 XML 请求体） */
+export async function importOpml(file: File): Promise<void> {
+  await request(`${READER_BASE}/subscription/import`, {
+    method: 'POST',
+    headers: {
+      ...authHeader(),
+      'Content-Type': file.type || 'application/xml',
+    },
+    body: file,
+  })
+}
+
+/** 导出 OPML，返回文件内容与后端建议的文件名 */
+export async function exportOpml(): Promise<{
+  blob: Blob
+  filename: string
+}> {
+  const response = await request(`${READER_BASE}/subscription/export`, {
+    headers: authHeader(),
+  })
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const filename = encodedFilename
+    ? decodeURIComponent(encodedFilename)
+    : (disposition.match(/filename="?([^";]+)"?/i)?.[1] ??
+      'subscriptions.opml')
+  return { blob: await response.blob(), filename }
+}
+
 export type SubscriptionAction = 'subscribe' | 'unsubscribe' | 'edit'
 
 export interface SubscriptionEditOptions {

@@ -250,6 +250,55 @@ async def test_no_auth(client: AsyncClient):
     assert r.status_code in (401, 422)  # 422 if FastAPI validates before auth
 
 
+async def test_import_standard_opml(client: AsyncClient):
+    """标准 OPML 的 outline 位于 body 下，导入后保留文件夹与自定义标题"""
+    headers = await _register(client, "opml-user")
+    opml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>Subscriptions</title></head>
+  <body>
+    <outline text="Technology" title="Technology">
+      <outline type="rss" text="Imported feed" title="Imported feed"
+               xmlUrl="https://example.com/imported.xml" />
+    </outline>
+  </body>
+</opml>"""
+    with patch("farewell_rss.services.feed.fetch", side_effect=_fake_fetch):
+        r = await client.post(
+            f"{BASE}/subscription/import",
+            content=opml,
+            headers={**headers, "Content-Type": "text/xml"},
+        )
+    assert r.status_code == 200, r.text
+
+    r = await client.get(f"{BASE}/subscription/list", headers=headers)
+    subscriptions = r.json()["subscriptions"]
+    assert len(subscriptions) == 1
+    assert subscriptions[0]["title"] == "Imported feed"
+    assert subscriptions[0]["categories"] == [
+        {"id": "user/-/label/Technology", "label": "Technology"}
+    ]
+
+
+async def test_export_opml_filename_uses_username(client: AsyncClient):
+    headers = await _register(client, "opml-export-user")
+
+    r = await client.get(f"{BASE}/subscription/export", headers=headers)
+
+    assert r.status_code == 200, r.text
+    assert r.headers["content-disposition"] == (
+        'attachment; filename="opml-export-user.opml"'
+    )
+    assert r.headers["content-type"].startswith("application/xml")
+
+    headers = await _register(client, "export user")
+    r = await client.get(f"{BASE}/subscription/export", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-disposition"] == (
+        "attachment; filename*=UTF-8''export%20user.opml"
+    )
+
+
 async def test_edit_profile(client: AsyncClient):
     """EditProfile：修改昵称、空串清空、未认证拒绝"""
     r = await client.post(

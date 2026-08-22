@@ -57,6 +57,12 @@ export const useSubscriptionsStore = defineStore('subscriptions', () => {
     return result.streamId
   }
 
+  /** 导入 OPML 并刷新订阅、分类和未读数 */
+  async function importOpml(file: File): Promise<void> {
+    await greader.importOpml(file)
+    await refresh()
+  }
+
   /** 新建标签（收藏夹）或文件夹 */
   async function createLabel(name: string, type: LabelType): Promise<void> {
     await greader.enableTag([name], [type])
@@ -116,6 +122,7 @@ export const useSubscriptionsStore = defineStore('subscriptions', () => {
     fetchUnreadCounts,
     refresh,
     addSubscription,
+    importOpml,
     createLabel,
     renameLabel,
     deleteLabel,

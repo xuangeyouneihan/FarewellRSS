@@ -3,6 +3,7 @@
 import logging
 import xml.etree.ElementTree as ET
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
@@ -206,10 +207,17 @@ async def export_opml(
                 _make_outline(folder_el, sub, feed)
 
     xml = ET.tostring(opml, encoding="unicode", xml_declaration=True)
+    filename = f"{user.username}.opml"
+    encoded_filename = quote(filename, safe="")
+    disposition = (
+        f'attachment; filename="{filename}"'
+        if encoded_filename == filename
+        else f"attachment; filename*=UTF-8''{encoded_filename}"
+    )
     return Response(
         content=xml,
         media_type="application/xml",
-        headers={"Content-Disposition": "attachment; filename=subscriptions.xml"},
+        headers={"Content-Disposition": disposition},
     )
 
 
@@ -285,5 +293,7 @@ async def import_opml(
                 else:
                     await _import_outlines(outline, folder_id)
 
-    await _import_outlines(root, None)
+    # 标准 OPML 的 outline 位于 <opml><body> 下；兼容旧的根级 outline 输入。
+    body_el = root.find("body") if root.tag.lower() == "opml" else None
+    await _import_outlines(body_el if body_el is not None else root, None)
     return Response("OK", media_type="text/plain")
