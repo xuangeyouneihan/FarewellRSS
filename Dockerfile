@@ -17,27 +17,18 @@ RUN pnpm build
 FROM python:3.14-slim AS package
 
 ARG RELEASE=false
-ARG APP_VERSION
 
 WORKDIR /build
 COPY . ./
 COPY --from=frontend /build/frontend/dist ./frontend/dist
 
-# 本地模式使用源码；发布模式只从 PyPI 获取包。
-# 本地版本顺序：APP_VERSION -> Git 自动判断 -> hatch-vcs fallback-version。
+# 本地模式使用源码；发布模式安装 workflow 传入的 wheel。
+# 发布 workflow 会将 uv build 生成的 wheel 下载到构建上下文的 dist/。
 RUN if [ "$RELEASE" = "true" ]; then \
-    if [ -n "$APP_VERSION" ]; then \
-    pip download --no-deps --dest /wheels "farewell-rss==$APP_VERSION"; \
-    else \
-    pip download --no-deps --dest /wheels farewell-rss; \
-    fi; \
+    mkdir -p /wheels && cp dist/*.whl /wheels/; \
     else \
     apt-get update && apt-get install -y --no-install-recommends git; \
-    if [ -n "$APP_VERSION" ]; then \
-    SETUPTOOLS_SCM_PRETEND_VERSION="$APP_VERSION" pip wheel . --no-deps --wheel-dir /wheels; \
-    else \
     pip wheel . --no-deps --wheel-dir /wheels; \
-    fi; \
     fi
 
 
