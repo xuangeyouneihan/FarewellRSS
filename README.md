@@ -44,16 +44,20 @@
 
 ### 本地
 
-```powershell
-cd frontend; pnpm install; pnpm build   # 构建前端（首次或有改动时）
-cd ..; farewell-rss                      # 一条命令同时起前后端（默认 3000 端口）
+```sh
+uv sync                                  # 创建环境并安装后端及开发依赖
+cd frontend
+pnpm install
+pnpm build                               # 构建前端（首次或有改动时）
+cd ..
+uv run farewell-rss                      # 一条命令同时起前后端（默认 3000 端口）
 ```
 
-浏览器开 `http://localhost:3000`。前端开发热更新用 `cd frontend; pnpm dev`（5173 端口，代理到 3000）。
+浏览器开 `http://localhost:3000`。前端开发热更新用 `cd frontend && pnpm dev`（5173 端口，代理到 3000）。
 
 ### Docker
 
-```bash
+```sh
 docker build -t farewell-rss .
 docker run -d -p 3000:3000 -v farewell-rss-data:/data farewell-rss
 ```

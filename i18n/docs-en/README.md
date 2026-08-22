@@ -44,16 +44,20 @@ All configuration is done through `FAREWELL_RSS_*` environment variables (data d
 
 ### Local
 
-```powershell
-cd frontend; pnpm install; pnpm build   # build the frontend (first time or after changes)
-cd ..; farewell-rss                      # start backend and frontend with one command (port 3000 by default)
+```sh
+uv sync                                  # create the environment and install backend/dev dependencies
+cd frontend
+pnpm install
+pnpm build                               # build the frontend (first time or after changes)
+cd ..
+uv run farewell-rss                      # start backend and frontend with one command (port 3000 by default)
 ```
 
-Open `http://localhost:3000` in your browser. For frontend development with hot reload, use `cd frontend; pnpm dev` (port 5173, proxied to 3000).
+Open `http://localhost:3000` in your browser. For frontend development with hot reload, use `cd frontend && pnpm dev` (port 5173, proxied to 3000).
 
 ### Docker
 
-```bash
+```sh
 docker build -t farewell-rss .
 docker run -d -p 3000:3000 -v farewell-rss-data:/data farewell-rss
 ```
