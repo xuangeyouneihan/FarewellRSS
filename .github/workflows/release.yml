@@ -5,7 +5,7 @@ on:
     types: [published]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   publish-pypi:
@@ -51,7 +51,9 @@ jobs:
       - name: Attach the Python wheel to the release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.whl
+          token: ${{ github.token }}
+          files: |
+            dist/*.whl
 
       - name: Publish to PyPI
         run: uv publish --token "${{ secrets.PYPI_API_TOKEN }}"
