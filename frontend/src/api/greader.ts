@@ -14,8 +14,12 @@ import type {
   UserInfo,
 } from '@/types/greader'
 
-const AUTH_BASE = '/api/accounts'
-const READER_BASE = '/api/reader/api/0'
+const appBase = window.location.pathname
+  .replace(/\/(?:login|register)\/?$/, '/')
+  .replace(/[^/]+$/, '')
+const API_BASE = `${appBase}api`.replace(/\/\//g, '/')
+const AUTH_BASE = `${API_BASE}/accounts`
+const READER_BASE = `${API_BASE}/reader/api/0`
 
 const TOKEN_KEY = 'farewell_rss_token'
 
