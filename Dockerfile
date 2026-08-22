@@ -1,43 +1,18 @@
 # syntax=docker/dockerfile:1
 
-# ─── 阶段 1：构建前端 ────────────────────────────────────────────
-FROM node:22-alpine AS frontend
-
-# corepack 启用 pnpm
-RUN corepack enable
-
-WORKDIR /build/frontend
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-
-COPY frontend/ ./
-RUN pnpm build
-# 产物在 /build/frontend/dist
-
-
-# ─── 阶段 2：运行时 ──────────────────────────────────────────────
+# Docker 镜像使用已发布到 PyPI 的包，避免在镜像构建时依赖源码或 Git 元数据。
 FROM python:3.14-slim
 
 # 默认环境变量（只设数据目录，其余用代码里的默认值）
 ENV FAREWELL_RSS_DATA_DIR=/data
 
-# 版本由 git tag 决定：hatch-vcs 在容器内跑 git describe 读 tag，需要 git 二进制 + .git
-RUN apt-get update && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
-
-# 代码上下文 = 仓库根（.dockerignore 控制进什么）
-WORKDIR /app
-
-# 后端依赖 + 源码 + git 元数据（hatch-vcs 读 tag 用）
-COPY pyproject.toml README.md LICENSE ./
-COPY src/ ./src/
-COPY .git ./.git
-# 前端构建产物（从阶段 1）
-COPY --from=frontend /build/frontend/dist ./frontend/dist
-
-# 安装 farewell-rss（hatch force-include 会把 frontend/dist 打进包）
-# git 仓库所有权与容器 root 不同，需标记 safe.directory
-RUN git config --global --add safe.directory /app && pip install --no-cache-dir .
+# 发布 workflow 传入 release tag 对应的版本；手动构建时默认安装 PyPI 最新版。
+ARG APP_VERSION
+RUN if [ -n "$APP_VERSION" ]; then \
+    pip install --no-cache-dir "farewell-rss==$APP_VERSION"; \
+    else \
+    pip install --no-cache-dir farewell-rss; \
+    fi
 
 # 数据目录（可挂卷持久化）
 RUN mkdir -p /data
