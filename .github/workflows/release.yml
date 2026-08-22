@@ -83,3 +83,11 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/farewell-rss:${{ steps.version.outputs.version }}
             ${{ secrets.DOCKERHUB_USERNAME }}/farewell-rss:latest
+
+      - name: Update Docker Hub overview
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/farewell-rss
+          readme-filepath: ./README.md
