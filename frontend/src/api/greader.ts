@@ -92,7 +92,7 @@ export async function login(email: string, password: string): Promise<void> {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: toFormBody({
       Email: email,
-      Password: password,
+      Passwd: password,
       accountType: 'GOOGLE',
       service: 'reader',
     }),
@@ -111,7 +111,7 @@ export async function register(
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: toFormBody({
       Email: email,
-      Password: password,
+      Passwd: password,
       friendly_name: friendlyName,
       invite_code: inviteCode,
     }),

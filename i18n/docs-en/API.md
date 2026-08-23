@@ -25,7 +25,7 @@ Full paths are annotated for each endpoint below.
 | Parameter       | Description         |
 | --------------- | ------------------- |
 | `Email`       | Username            |
-| `Password`    | Password            |
+| `Passwd`      | Password            |
 | `accountType` | Fixed `GOOGLE`    |
 | `service`     | Fixed `reader`    |
 
@@ -42,7 +42,7 @@ Authentication uses an HMAC-SHA256 Auth Token, passed via the `Authorization: Go
 | Parameter         | Description     |
 | ----------------- | --------------- |
 | `Email`         | Username (required) |
-| `Password`      | Password (required) |
+| `Passwd`      | Password (required) |
 | `friendly_name` | Nickname (optional) |
 | `invite_code`   | Invite code (required when `FAREWELL_RSS_INVITE_CODE` is configured) |
 

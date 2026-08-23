@@ -25,7 +25,7 @@
 | 参数            | 说明           |
 | --------------- | -------------- |
 | `Email`       | 用户名         |
-| `Password`    | 密码           |
+| `Passwd`      | 密码           |
 | `accountType` | 固定`GOOGLE` |
 | `service`     | 固定`reader` |
 
@@ -42,7 +42,7 @@
 | 参数              | 说明           |
 | ----------------- | -------------- |
 | `Email`         | 用户名（必填） |
-| `Password`      | 密码（必填）   |
+| `Passwd`        | 密码（必填）   |
 | `friendly_name` | 昵称（可选）   |
 | `invite_code`   | 邀请码（配置了 `FAREWELL_RSS_INVITE_CODE` 时必填） |
 

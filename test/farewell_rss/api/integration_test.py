@@ -156,7 +156,7 @@ async def test_full_flow(client: AsyncClient):
         "/api/accounts/ClientRegister",
         data={
             "Email": "chef",
-            "Password": "fried-rice",
+            "Passwd": "fried-rice",
             "friendly_name": "大厨",
         },
     )
@@ -220,7 +220,7 @@ async def test_full_flow(client: AsyncClient):
 
 
 async def test_register_duplicate(client: AsyncClient):
-    data = {"Email": "dup", "Password": "pw", "friendly_name": "D"}
+    data = {"Email": "dup", "Passwd": "pw", "friendly_name": "D"}
     await client.post("/api/accounts/ClientRegister", data=data)
     r = await client.post("/api/accounts/ClientRegister", data=data)
     assert r.status_code == 409
@@ -231,7 +231,7 @@ async def test_login_wrong_password(client: AsyncClient):
         "/api/accounts/ClientRegister",
         data={
             "Email": "alice",
-            "Password": "correct",
+            "Passwd": "correct",
             "friendly_name": "A",
         },
     )
@@ -239,7 +239,7 @@ async def test_login_wrong_password(client: AsyncClient):
         "/api/accounts/ClientLogin",
         data={
             "Email": "alice",
-            "Password": "wrong",
+            "Passwd": "wrong",
         },
     )
     assert r.status_code == 401
@@ -303,7 +303,7 @@ async def test_edit_profile(client: AsyncClient):
     """EditProfile：修改昵称、空串清空、未认证拒绝"""
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": "profile-user", "Password": "pw", "friendly_name": "旧昵称"},
+        data={"Email": "profile-user", "Passwd": "pw", "friendly_name": "旧昵称"},
     )
     assert r.status_code == 200, r.text
     h = {"Authorization": f"GoogleLogin auth={_auth(r.text)}"}
@@ -349,7 +349,7 @@ async def test_register_control(client: AsyncClient, monkeypatch):
     monkeypatch.delenv("FAREWELL_RSS_INVITE_CODE", raising=False)
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": "u1", "Password": "pw"},
+        data={"Email": "u1", "Passwd": "pw"},
     )
     assert r.status_code == 403, r.text
     assert r.json()["detail"]["code"] == "RegisterDisabledError"
@@ -359,18 +359,18 @@ async def test_register_control(client: AsyncClient, monkeypatch):
     monkeypatch.setenv("FAREWELL_RSS_INVITE_CODE", "secret-code")
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": "u2", "Password": "pw"},
+        data={"Email": "u2", "Passwd": "pw"},
     )
     assert r.status_code == 403, r.text
     assert r.json()["detail"]["code"] == "InvalidInviteCodeError"
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": "u2", "Password": "pw", "invite_code": "wrong"},
+        data={"Email": "u2", "Passwd": "pw", "invite_code": "wrong"},
     )
     assert r.status_code == 403, r.text
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": "u2", "Password": "pw", "invite_code": "secret-code"},
+        data={"Email": "u2", "Passwd": "pw", "invite_code": "secret-code"},
     )
     assert r.status_code == 200, r.text
 
@@ -379,7 +379,7 @@ async def test_register_control(client: AsyncClient, monkeypatch):
     monkeypatch.delenv("FAREWELL_RSS_INVITE_CODE", raising=False)
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": "u3", "Password": "pw"},
+        data={"Email": "u3", "Passwd": "pw"},
     )
     assert r.status_code == 200, r.text
 
@@ -387,7 +387,7 @@ async def test_register_control(client: AsyncClient, monkeypatch):
     monkeypatch.delenv("FAREWELL_RSS_ALLOW_REGISTER", raising=False)
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": "u4", "Password": "pw"},
+        data={"Email": "u4", "Passwd": "pw"},
     )
     assert r.status_code == 200, r.text
 
@@ -399,7 +399,7 @@ async def test_first_user_bypasses_register_control(client: AsyncClient, monkeyp
     monkeypatch.setenv("FAREWELL_RSS_INVITE_CODE", "some-code")
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": "first-admin", "Password": "pw"},
+        data={"Email": "first-admin", "Passwd": "pw"},
     )
     assert r.status_code == 200, r.text
     # 且自动成为管理员
@@ -410,7 +410,7 @@ async def test_first_user_bypasses_register_control(client: AsyncClient, monkeyp
     # 第二个用户开始被注册控制拦截
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": "second-user", "Password": "pw"},
+        data={"Email": "second-user", "Passwd": "pw"},
     )
     assert r.status_code == 403, r.text
 
@@ -459,7 +459,7 @@ async def test_create_user(client: AsyncClient, monkeypatch):
 
     # 新用户能登录
     r = await client.post(
-        "/api/accounts/ClientLogin", data={"Email": "new-user", "Password": "pw"}
+        "/api/accounts/ClientLogin", data={"Email": "new-user", "Passwd": "pw"}
     )
     assert r.status_code == 200, r.text
 
@@ -467,7 +467,7 @@ async def test_create_user(client: AsyncClient, monkeypatch):
     r = await create("new-admin", is_admin="true")
     assert r.status_code == 201, r.text
     r = await client.post(
-        "/api/accounts/ClientLogin", data={"Email": "new-admin", "Password": "pw"}
+        "/api/accounts/ClientLogin", data={"Email": "new-admin", "Passwd": "pw"}
     )
     h = {"Authorization": f"GoogleLogin auth={_auth(r.text)}"}
     r = await client.get(f"{BASE}/user-info", headers=h)
@@ -617,7 +617,7 @@ async def test_set_admin(client: AsyncClient):
 async def _register(client: AsyncClient, username: str = "user") -> dict:
     r = await client.post(
         "/api/accounts/ClientRegister",
-        data={"Email": username, "Password": "pw", "friendly_name": "U"},
+        data={"Email": username, "Passwd": "pw", "friendly_name": "U"},
     )
     assert r.status_code == 200, r.text
     return {"Authorization": f"GoogleLogin auth={_auth(r.text)}"}

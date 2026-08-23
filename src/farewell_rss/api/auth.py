@@ -39,7 +39,7 @@ def _get_source() -> str:
 
 class LoginParams(BaseModel):
     Email: str  # 说是邮箱但实际上是用户名
-    Password: str  # 密码
+    Passwd: str  # 密码（Google Reader/FreshRSS 标准字段）
     accountType: str = "GOOGLE"  # 固定
     service: str = "reader"  # 固定
     source: str = _get_source()  # RSS 服务标识
@@ -47,7 +47,7 @@ class LoginParams(BaseModel):
 
 async def _sign_in(login_params: LoginParams, user_service: UserService) -> Response:
     """处理登录请求，返回认证令牌，GET 和 POST 的登录都会调用这个函数"""
-    user = await user_service.authenticate(login_params.Email, login_params.Password)
+    user = await user_service.authenticate(login_params.Email, login_params.Passwd)
     if not user:
         # 此处不记日志，因为日志在 UserService.authenticate 中已经记录了认证失败的详细信息
         raise HTTPException(
@@ -93,7 +93,7 @@ async def _register(
     try:
         user = await user_service.register(
             register_params.Email,
-            register_params.Password,
+            register_params.Passwd,
             register_params.friendly_name,
             register_params.invite_code,
         )
