@@ -6,6 +6,7 @@ export type LabelType = 'folder' | 'tag'
 export const STATE = {
   readingList: 'user/-/state/com.google/reading-list',
   read: 'user/-/state/com.google/read',
+  unread: 'user/-/state/com.google/unread',
   starred: 'user/-/state/com.google/starred',
   uncategorized: 'user/-/state/farewell-rss/starred-uncategorized',
 } as const

@@ -42,6 +42,8 @@ async def list_labels(
     result = [
         {"id": "user/-/state/com.google/reading-list"},
         {"id": "user/-/state/com.google/starred"},
+        {"id": "user/-/state/com.google/read"},
+        {"id": "user/-/state/com.google/unread"},
     ] + [{"id": f"user/-/label/{label.name}", "type": label.type} for label in labels]
     return {"tags": result}
 

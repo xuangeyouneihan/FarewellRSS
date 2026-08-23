@@ -164,6 +164,17 @@ async def test_full_flow(client: AsyncClient):
     token = _auth(r.text)
     h = {"Authorization": f"GoogleLogin auth={token}"}
 
+    # Google Reader 标准状态流会出现在 tag/list 中
+    r = await client.get(f"{BASE}/tag/list", headers=h)
+    assert r.status_code == 200, r.text
+    tag_ids = {tag["id"] for tag in r.json()["tags"]}
+    assert {
+        "user/-/state/com.google/reading-list",
+        "user/-/state/com.google/starred",
+        "user/-/state/com.google/read",
+        "user/-/state/com.google/unread",
+    } <= tag_ids
+
     # 2. 订阅
     with patch("farewell_rss.services.feed.fetch", side_effect=_fake_fetch):
         r = await client.post(
@@ -214,6 +225,66 @@ async def test_full_flow(client: AsyncClient):
     assert len(items) == 3
     for item in items:
         assert "user/-/state/com.google/read" in item["categories"]
+
+    # 7. FreshRSS 兼容：直接访问已读流
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/read",
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["items"]) == 3
+
+    # 7b. Google Reader 标准未读流
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/unread",
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["items"] == []
+
+    # 8. FreshRSS 兼容：已读流可作为 it/xt 筛选值
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/reading-list",
+        params={"it": "user/-/state/com.google/read"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["items"]) == 3
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/reading-list",
+        params={"xt": "user/-/state/com.google/read"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["items"] == []
+
+    # 9. edit-tag 可移除和恢复已读状态
+    item_id = items[0]["id"]
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": item_id, "r": "user/-/state/com.google/read"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/read",
+        headers=h,
+    )
+    assert len(r.json()["items"]) == 2
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": item_id, "a": "user/-/state/com.google/read"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+    # 10. mark-all-as-read 可接受已读流（幂等）
+    r = await client.post(
+        f"{BASE}/mark-all-as-read",
+        data={"s": "user/-/state/com.google/read"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
 
 
 # ─── 错误路径 ────────────────────────────────────────────────────────────
@@ -787,3 +858,394 @@ async def test_mark_all_as_read_type(client: AsyncClient):
     )
     items = r.json()["items"]
     assert "user/-/state/com.google/read" in items[0]["categories"]
+
+
+# ─── Google Reader 协议与完整资源生命周期 ────────────────────────────────
+
+
+async def test_auth_get_token_user_info_and_xml_negotiation(client: AsyncClient):
+    """认证 GET/POST、T token、用户信息和 XML 拒绝均符合协议约定"""
+    r = await client.get(
+        "/api/accounts/ClientRegister",
+        params={"Email": "protocol-user", "Passwd": "pw", "friendly_name": "协议用户"},
+    )
+    assert r.status_code in (200, 201), r.text
+    auth = _auth(r.text)
+    headers = {"Authorization": f"GoogleLogin auth={auth}"}
+
+    r = await client.get(
+        "/api/accounts/ClientLogin",
+        params={"Email": "protocol-user", "Passwd": "pw"},
+    )
+    assert r.status_code == 200, r.text
+    assert _auth(r.text).split("/", 1)[1]
+
+    r = await client.get(f"{BASE}/token", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.text == auth.split("/", 1)[1]
+
+    r = await client.get(f"{BASE}/user-info", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "userId": "protocol-user",
+        "userName": "协议用户",
+        "userProfileId": r.json()["userProfileId"],
+        "userEmail": "protocol-user",
+        "isAdmin": True,
+    }
+
+    r = await client.get(
+        f"{BASE}/subscription/list", params={"output": "xml"}, headers=headers
+    )
+    assert r.status_code == 501, r.text
+
+
+async def test_subscription_edit_lifecycle_and_validation(client: AsyncClient):
+    """subscription/edit 的 subscribe/edit/unsubscribe 分支和错误参数"""
+    headers = await _register(client, "subscription-user")
+
+    with patch("farewell_rss.services.feed.fetch", side_effect=_fake_fetch):
+        r = await client.post(
+            f"{BASE}/subscription/edit",
+            data={
+                "ac": "subscribe",
+                "s": "feed/https://example.com/second.xml",
+                "t": "自定义标题",
+            },
+            headers=headers,
+        )
+    assert r.status_code == 200, r.text
+
+    r = await client.get(f"{BASE}/subscription/list", headers=headers)
+    assert r.status_code == 200, r.text
+    subscriptions = r.json()["subscriptions"]
+    assert len(subscriptions) == 1
+    assert subscriptions[0]["title"] == "自定义标题"
+    feed_id = subscriptions[0]["id"]
+
+    r = await client.post(
+        f"{BASE}/subscription/edit",
+        data={"ac": "edit", "s": feed_id, "t": "重命名"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(f"{BASE}/subscription/list", headers=headers)
+    assert r.json()["subscriptions"][0]["title"] == "重命名"
+
+    r = await client.post(
+        f"{BASE}/subscription/edit",
+        data={"ac": "unsubscribe", "s": feed_id},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(f"{BASE}/subscription/list", headers=headers)
+    assert r.json()["subscriptions"] == []
+
+    r = await client.post(
+        f"{BASE}/subscription/edit",
+        data={"ac": "unsubscribe", "s": "feed/not-a-number"},
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+
+    r = await client.post(
+        f"{BASE}/subscription/quickadd",
+        data={"quickadd": "not-a-url"},
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"]["numResults"] == 0
+
+
+async def test_stream_filters_pagination_search_and_item_endpoints(client: AsyncClient):
+    """标准状态流、Feed/搜索流、筛选、时间范围、分页及 items 端点"""
+    headers = await _register(client, "stream-user")
+    await _subscribe(client, headers)
+    ids = await _title_to_id(client, headers)
+    first_id = ids["《炒饭指南》第一章"]
+    second_id = ids["《炒饭指南》第二章"]
+
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": first_id, "a": "user/-/state/com.google/read"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": second_id, "a": "user/-/state/com.google/starred"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+
+    for stream_id, expected_titles in (
+        ("user/-/state/com.google/read", {"《炒饭指南》第一章"}),
+        (
+            "user/-/state/com.google/unread",
+            {"《炒饭指南》第二章", "《炒饭指南》第三章"},
+        ),
+        ("user/-/state/com.google/starred", {"《炒饭指南》第二章"}),
+    ):
+        r = await client.get(f"{BASE}/stream/contents/{stream_id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert {item["title"] for item in r.json()["items"]} == expected_titles
+
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/reading-list",
+        params={"it": "user/-/state/com.google/unread"},
+        headers=headers,
+    )
+    assert [item["title"] for item in r.json()["items"]] == [
+        "《炒饭指南》第三章",
+        "《炒饭指南》第二章",
+    ]
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/reading-list",
+        params={"xt": "user/-/state/com.google/read"},
+        headers=headers,
+    )
+    assert all("第一章" not in item["title"] for item in r.json()["items"])
+
+    feed_id = (await client.get(f"{BASE}/subscription/list", headers=headers)).json()[
+        "subscriptions"
+    ][0]["id"]
+    r = await client.get(f"{BASE}/stream/contents/{feed_id}", headers=headers)
+    assert len(r.json()["items"]) == 3
+
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/search/炒饭指南",
+        params={"n": 1},
+        headers=headers,
+    )
+    assert len(r.json()["items"]) == 1
+    assert "continuation" in r.json()
+    continuation = r.json()["continuation"]
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/search/炒饭指南",
+        params={"n": 5, "c": continuation},
+        headers=headers,
+    )
+    assert len(r.json()["items"]) == 2
+
+    r = await client.get(
+        f"{BASE}/stream/items/ids",
+        params={"s": "user/-/state/com.google/reading-list", "n": 2},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["itemRefs"]) == 2
+    item_ids = [item["id"] for item in r.json()["itemRefs"]]
+    r = await client.post(
+        f"{BASE}/stream/items/contents",
+        data={"i": item_ids},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["items"]) == 2
+    assert all(
+        item["origin"]["streamId"].startswith("feed/") for item in r.json()["items"]
+    )
+
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/reading-list",
+        params={"n": 1, "r": "o"},
+        headers=headers,
+    )
+    assert len(r.json()["items"]) == 1
+    assert "continuation" in r.json()
+
+
+async def test_label_lifecycle_and_type_specific_streams(client: AsyncClient):
+    """folder/tag 创建、重命名、删除及同名流类型选择"""
+    headers = await _register(client, "label-user")
+    await _subscribe(client, headers)
+    folder_id = "user/-/label/项目"
+    tag_id = "user/-/label/项目"
+    for label_id, type_ in ((folder_id, "folder"), (tag_id, "tag")):
+        r = await client.post(
+            f"{BASE}/enable-tag", data={"s": label_id, "type": type_}, headers=headers
+        )
+        assert r.status_code == 200, r.text
+
+    ids = await _title_to_id(client, headers)
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": ids["《炒饭指南》第一章"], "a": tag_id},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    feed_id = (await client.get(f"{BASE}/subscription/list", headers=headers)).json()[
+        "subscriptions"
+    ][0]["id"]
+    await client.post(
+        f"{BASE}/subscription/edit",
+        data={"ac": "edit", "s": feed_id, "a": folder_id},
+        headers=headers,
+    )
+
+    r = await client.get(
+        f"{BASE}/stream/contents/{folder_id}", params={"type": "tag"}, headers=headers
+    )
+    assert len(r.json()["items"]) == 1
+    r = await client.get(
+        f"{BASE}/stream/contents/{folder_id}",
+        params={"type": "folder"},
+        headers=headers,
+    )
+    assert len(r.json()["items"]) == 3
+
+    r = await client.post(
+        f"{BASE}/rename-tag",
+        data={"s": folder_id, "dest": "user/-/label/工作", "type": "folder"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/label/工作",
+        params={"type": "folder"},
+        headers=headers,
+    )
+    assert len(r.json()["items"]) == 3
+
+    r = await client.post(
+        f"{BASE}/disable-tag",
+        data={"s": "user/-/label/工作", "type": "folder"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/label/工作",
+        params={"type": "folder"},
+        headers=headers,
+    )
+    assert r.status_code == 404
+
+    r = await client.post(
+        f"{BASE}/rename-tag",
+        data={"s": tag_id, "dest": "user/-/label/标签"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.post(
+        f"{BASE}/disable-tag", data={"s": "user/-/label/标签"}, headers=headers
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_unread_count_and_mark_all_as_read_scopes(client: AsyncClient):
+    """未读计数覆盖 feed/folder/tag，批量已读覆盖截止 ID 和 starred 流"""
+    headers = await _register(client, "count-user")
+    await _subscribe(client, headers)
+    ids = await _title_to_id(client, headers)
+    first_id = ids["《炒饭指南》第一章"]
+    await client.post(
+        f"{BASE}/enable-tag",
+        data={"s": "user/-/label/收藏", "type": "tag"},
+        headers=headers,
+    )
+    await client.post(
+        f"{BASE}/edit-tag",
+        data={
+            "i": first_id,
+            "a": ["user/-/state/com.google/starred", "user/-/label/收藏"],
+        },
+        headers=headers,
+    )
+    r = await client.get(f"{BASE}/unread-count", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["max"] == 3
+    counts = {item["id"]: item["count"] for item in r.json()["unreadcounts"]}
+    assert counts["user/-/state/com.google/reading-list"] == 3
+    assert counts["user/-/label/收藏"] == 1
+
+    r = await client.post(
+        f"{BASE}/mark-all-as-read",
+        data={"s": "user/-/state/com.google/starred", "ts": first_id},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/unread", headers=headers
+    )
+    assert len(r.json()["items"]) <= 2
+
+    r = await client.post(
+        f"{BASE}/mark-all-as-read",
+        data={"s": "feed/not-a-number"},
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+
+
+async def test_change_password_and_delete_account_permissions(client: AsyncClient):
+    """本人改密/删号、非管理员越权和管理员删除用户"""
+    admin = await _register(client, "account-admin")
+    owner = await _register(client, "account-owner")
+    other = await _register(client, "account-other")
+
+    r = await client.post(
+        "/api/accounts/ChangePassword",
+        data={
+            "username": "account-owner",
+            "new_password": "new-pw",
+            "operator_username": "account-owner",
+            "operator_password": "pw",
+        },
+    )
+    assert r.status_code == 200, r.text
+    r = await client.post(
+        "/api/accounts/ClientLogin", data={"Email": "account-owner", "Passwd": "new-pw"}
+    )
+    assert r.status_code == 200, r.text
+
+    r = await client.post(
+        "/api/accounts/ChangePassword",
+        data={
+            "username": "account-other",
+            "new_password": "x",
+            "operator_username": "account-owner",
+            "operator_password": "new-pw",
+        },
+    )
+    assert r.status_code == 403, r.text
+
+    r = await client.post(
+        "/api/accounts/DeleteAccount",
+        data={
+            "username": "account-other",
+            "operator_username": "account-admin",
+            "operator_password": "pw",
+        },
+    )
+    assert r.status_code == 200, r.text
+    r = await client.post(
+        "/api/accounts/ClientLogin", data={"Email": "account-other", "Passwd": "pw"}
+    )
+    assert r.status_code == 401, r.text
+
+    r = await client.post(
+        "/api/accounts/DeleteAccount",
+        data={
+            "username": "account-owner",
+            "operator_username": "account-owner",
+            "operator_password": "new-pw",
+        },
+    )
+    assert r.status_code == 200, r.text
+    r = await client.post(
+        "/api/accounts/ClientLogin", data={"Email": "account-owner", "Passwd": "new-pw"}
+    )
+    assert r.status_code == 401, r.text
+
+    # 删除后的账户不能再次登录
+    r = await client.post(
+        "/api/accounts/DeleteAccount",
+        data={
+            "username": "account-owner",
+            "operator_username": "account-owner",
+            "operator_password": "new-pw",
+        },
+    )
+    assert r.status_code == 400, r.text
+
+    assert admin["Authorization"].startswith("GoogleLogin auth=")

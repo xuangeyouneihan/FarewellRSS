@@ -164,6 +164,8 @@ Supported stream paths:
 | ---------------------------------------- | -------------------------- |
 | `user/-/state/com.google/reading-list` | All entries                |
 | `user/-/state/com.google/starred`      | Starred                    |
+| `user/-/state/com.google/read`         | Read                       |
+| `user/-/state/com.google/unread`       | Unread                     |
 | `user/-/state/farewell-rss/starred-uncategorized` | Uncategorized starred (extension) |
 | `feed/{id}`                            | A single feed              |
 | `user/-/label/{name}`                  | Folder/tag (FOLDER takes precedence) |

@@ -111,6 +111,22 @@ async def _resolve_stream(
                 include=Filtering.STARRED,
                 exclude=None,
             )
+        case "user/-/state/com.google/read":
+            raw_entries = await user_service.list_entries(
+                user=user,
+                start=start,
+                end=end,
+                include=Filtering.READ,
+                exclude=None,
+            )
+        case "user/-/state/com.google/unread":
+            raw_entries = await user_service.list_entries(
+                user=user,
+                start=start,
+                end=end,
+                include=Filtering.UNREAD,
+                exclude=None,
+            )
         case "user/-/state/farewell-rss/starred-uncategorized":
             star_states = await star_state_service.list_uncategorized(user)
             if star_states:

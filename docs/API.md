@@ -164,6 +164,8 @@
 | ---------------------------------------- | -------------------------- |
 | `user/-/state/com.google/reading-list` | 全部                       |
 | `user/-/state/com.google/starred`      | 已收藏                     |
+| `user/-/state/com.google/read`         | 已读                       |
+| `user/-/state/com.google/unread`       | 未读                       |
 | `user/-/state/farewell-rss/starred-uncategorized` | 未分类收藏（扩展）     |
 | `feed/{id}`                            | 单个订阅源                 |
 | `user/-/label/{name}`                  | 文件夹/标签（FOLDER 优先） |
