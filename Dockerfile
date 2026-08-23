@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # ─── 阶段 1：构建前端 ────────────────────────────────────────────
-FROM node:22-alpine AS frontend
+# 前端产物是纯静态文件，只在 BuildKit 的构建机架构上构建一次。
+# 否则多架构构建会在 QEMU 下重复运行 Node/pnpm，ARM64 容易触发非法指令。
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
 
-RUN corepack enable
+RUN corepack enable && corepack install --global pnpm@10
 
 WORKDIR /build/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
