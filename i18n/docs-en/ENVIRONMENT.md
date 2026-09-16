@@ -47,6 +47,16 @@ OS environment variables  >  .env file in the data directory
 | `FAREWELL_RSS_FEED_MIN_TTL`                | `900` (15 minutes)    | TTL floor (seconds). When a feed declares a TTL below this value, this value is used instead, to prevent overly frequent fetching. |
 | `FAREWELL_RSS_FEED_UPDATE_MAX_CONCURRENCY` | `10`                  | Maximum number of feeds fetched concurrently.                                                                   |
 
+### Password Hashing
+
+| Variable                                 | Default                | Description                                                                                                                                                                    |
+| ---------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FAREWELL_RSS_PASSWORD_MAX_CONCURRENCY` | `min(4, CPU cores)`   | Size of the thread pool used for bcrypt password hashing / verification. Password operations are expensive (~0.2s each) and blocking, so they run in a dedicated pool to avoid stalling the event loop. bcrypt releases the GIL, so the pool achieves true parallelism (measured: 4 concurrent hashes ≈ 4x speedup). |
+
+- This pool is **dedicated** to password operations and is not shared with other work such as feed fetching (otherwise fetching would fill the pool and login requests would have to queue behind it).
+- Lower → less concurrency for password operations, which adds a layer of rate limiting against brute force; higher → less queueing under concurrent logins, with throughput scaling up to about the CPU core count (more threads than cores only contend for CPU, with no extra gain).
+- Must be an integer of at least 1, otherwise startup fails (the variable is read at process startup, so a restart is required after changing it).
+
 ## Examples
 
 ### Read-only deployment (self-service registration disabled + invite code)

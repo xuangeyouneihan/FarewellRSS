@@ -5,11 +5,10 @@ import logging
 import os
 from datetime import datetime
 
-import bcrypt
-
 from ..db.models import Entry, User
 from ..db.repositories.user import UserRepository
 from .__init__ import Filtering
+from ._password import hash_password, verify_password
 from .exceptions import (
     InvalidInviteCodeError,
     LastAdminDeletionError,
@@ -88,7 +87,7 @@ class UserService:
                 _logger.warning("用户 %s 注册时邀请码错误", username)
                 raise InvalidInviteCodeError
 
-        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        password_hash = await hash_password(password)
         _logger.info(
             "注册新用户 %s，昵称：%s，是否管理员：%s",
             username,
@@ -118,7 +117,7 @@ class UserService:
         existing = await self._repository.get_by_username(username)
         if existing:
             raise RegisterExistingUserError.from_username(username)
-        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        password_hash = await hash_password(password)
         _logger.info(
             "管理员 %s（%d）创建用户 %s，昵称：%s，是否管理员：%s",
             operator.username,
@@ -138,7 +137,7 @@ class UserService:
         user = await self._repository.get_by_username(username)
         if (
             user
-            and bcrypt.checkpw(password.encode(), user.password_hash.encode())
+            and await verify_password(password, user.password_hash)
             and not user.deleted_at
         ):
             _logger.info("用户 %s（%d）认证成功", username, user.id)
@@ -160,9 +159,7 @@ class UserService:
 
     async def update_password(self, user: User, new_password: str) -> User | None:
         _logger.info("更新用户 %d 的密码", user.id)
-        new_password_hash = bcrypt.hashpw(
-            new_password.encode(), bcrypt.gensalt()
-        ).decode()
+        new_password_hash = await hash_password(new_password)
         return await self._repository.update_password(user, new_password_hash)
 
     async def update_profile(
