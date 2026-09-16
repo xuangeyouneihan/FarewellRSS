@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import hmac
 import logging
@@ -185,6 +184,11 @@ class UserService:
         return await self._repository.update_admin_state(user, is_admin)
 
     async def delete(self, user: User, operator: User) -> None:
+        """软删除用户：标记 deleted_at，立即对其认证生效
+
+        真正的数据清理是**独立作业**，由调用方安排（见 jobs.hard_delete_user）：
+        清理必须自建 session，不能挂在请求作用域的 session 上。
+        """
         if not operator.is_admin and operator.id != user.id:
             raise UserDeletionPermissionError
         if len(await self._repository.list_admins()) == 1 and user.is_admin:
@@ -192,7 +196,6 @@ class UserService:
             raise LastAdminDeletionError.from_username(user.username)
         _logger.info("用户 %d 将用户 %d 标记为已删除", operator.id, user.id)
         await self._repository.mark_as_deleted(user)
-        asyncio.create_task(self._hard_delete(user))
 
     async def list_entries(
         self,
@@ -239,7 +242,12 @@ class UserService:
         _logger.info("Auth token 验证成功，用户名：%s", username)
         return await self._repository.get_by_username(username)
 
-    async def _hard_delete(self, user: User) -> None:
+    async def purge(self, user: User) -> None:
+        """彻底删除用户及其全部数据
+
+        供 jobs.hard_delete_user 在**自建 session** 上调用，所以这里不能假设
+        自己处在某个请求的事务里。
+        """
         _logger.info("彻底清理用户 %d 的数据", user.id)
         await self._read_state_service.delete_by_user(user)
         await self._star_state_service.delete_by_user(user)

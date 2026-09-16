@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from datetime import datetime
 
@@ -106,32 +105,31 @@ class SubscriptionService:
         await self._repository.clear_folder(label.id)
 
     async def unsubscribe(self, subscription: Subscription) -> None:
-        _logger.info(
-            "用户 %d 退订源 %d", subscription.user_id, subscription.feed_id
-        )
+        """退订
+
+        如果这是最后一个订阅者，该源会成为「孤儿源」，由 scheduler 的
+        周期性清理回收（见 scheduler.prune_orphan_feeds）。**不在这里顺手清理**：
+        清理是维护任务，不该让退订请求承担它的耗时与破坏性。
+        """
+        _logger.info("用户 %d 退订源 %d", subscription.user_id, subscription.feed_id)
         feed = await self._feed_service.get(subscription.feed_id)
         if feed:
+            # 「标为已读但没真读过」的状态随订阅一起丢弃，真实阅读历史保留
             await self._read_state_service.prune_by_subscription(
                 subscription.user_id, subscription.feed_id
             )
         await self._repository.delete(subscription)
-        if feed:
-            asyncio.create_task(self._maybe_prune_feed(feed))
 
     async def delete_by_user(self, user: User) -> None:
+        """删除用户的全部订阅（产生的孤儿源由 scheduler 的清理回收）"""
         _logger.info("删除用户 %d 的所有订阅", user.id)
         subscriptions = await self.list_by_user(user)
-        feeds: list[Feed] = []
         for subscription in subscriptions:
-            feed = await self._feed_service.get(subscription.feed_id)
-            if feed:
-                feeds.append(feed)
+            if await self._feed_service.get(subscription.feed_id):
                 await self._read_state_service.prune_by_subscription(
                     subscription.user_id, subscription.feed_id
                 )
         await self._repository.delete_by_user(user.id)
-        for feed in feeds:
-            asyncio.create_task(self._maybe_prune_feed(feed))
 
     async def subscription_count(self, feed: Feed) -> int:
         return await self._repository.subscription_count(feed.id)
@@ -193,8 +191,3 @@ class SubscriptionService:
         else:
             result = raw
         return result
-
-    async def _maybe_prune_feed(self, feed: Feed) -> None:
-        if await self.subscription_count(feed) == 0:
-            _logger.info("订阅源 %d 没有订阅者，尝试清理", feed.id)
-            await self._feed_service.prune(feed)

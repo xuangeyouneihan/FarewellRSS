@@ -69,7 +69,7 @@ async def _fake_fetch(url, etag=None, modified=None):
 
 
 @pytest_asyncio.fixture
-async def client():
+async def client(monkeypatch):
     import os
 
     os.environ["FAREWELL_RSS_DATA_DIR"] = ":memory:"
@@ -117,6 +117,11 @@ async def client():
     from unittest.mock import AsyncMock
 
     from farewell_rss.db.db import get_session
+
+    # 删除账户后的硬删除是**后台作业**，它自建 session（进程级 SessionLocal，
+    # 会指向真实数据目录）。这里把它挡掉，只验证 API 层契约（软删除后立即
+    # 无法登录）；作业本身的清理逻辑由 jobs_test.py 覆盖。
+    monkeypatch.setattr("farewell_rss.jobs.hard_delete_user", AsyncMock())
 
     async def _override_get_session():
         async with TestSession() as s:

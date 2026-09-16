@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Annotated
 
@@ -12,6 +13,7 @@ from fastapi import (
 )
 from pydantic import BaseModel
 
+from .. import jobs
 from ..api.deps import get_current_user, get_user_service
 from ..db.models import User
 from ..services.exceptions import (
@@ -297,6 +299,8 @@ async def delete_account(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": type(e).__name__, "detail": str(e)},
         )
+    # 软删除已生效（认证立即失效），数据清理是独立作业、自建 session 在后台跑
+    asyncio.create_task(jobs.hard_delete_user(target.id))
     return Response("OK", media_type="text/plain")
 
 
