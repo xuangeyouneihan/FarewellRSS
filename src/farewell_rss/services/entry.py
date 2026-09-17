@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
 
-from ..db.models import Entry, Feed
+from ..db.models import Entry, Feed, User
 from ..db.repositories.entry import EntryRepository
 from .read_state import ReadStateService
 from .star_state import StarStateService
@@ -54,6 +54,19 @@ class EntryService:
         )
         await self._repository.delete_batch(to_be_deleted)
         return result
+
+    async def list_by_read_history(self, user: User) -> list[Entry]:
+        """列出用户真正读过的条目（阅读历史）。
+
+        与「已读」的区别：批量标已读会写入 timestamp=None 的 ReadState，
+        那类条目不算读过，也不会出现在这里（见 ReadState.timestamp 的注释）。
+        """
+        read_states = await self._read_state_service.list_history(user)
+        if not read_states:
+            return []
+        entry_ids = [read_state.entry_id for read_state in read_states]
+        # 条目可能已被清理（prune），get_batch 只会返回还存在的
+        return list((await self._repository.get_batch(entry_ids)).values())
 
     async def entry_count(self, feed: Feed) -> int:
         return await self._repository.entry_count(feed.id)

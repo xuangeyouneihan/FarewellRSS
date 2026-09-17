@@ -27,6 +27,10 @@ class ReadStateService:
     async def list_by_subscription(self, user_id: int, feed_id: int) -> list[ReadState]:
         return await self._repository.list_by_subscription(user_id, feed_id)
 
+    async def list_history(self, user: User) -> list[ReadState]:
+        """用户的阅读历史（timestamp 非空的已读状态）"""
+        return await self._repository.list_history(user.id)
+
     async def upsert(
         self,
         user: User,

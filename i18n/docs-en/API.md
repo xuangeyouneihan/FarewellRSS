@@ -167,9 +167,12 @@ Supported stream paths:
 | `user/-/state/com.google/read`         | Read                       |
 | `user/-/state/com.google/unread`       | Unread                     |
 | `user/-/state/farewell-rss/starred-uncategorized` | Uncategorized starred (extension) |
+| `user/-/state/farewell-rss/history`    | Reading history (extension) |
 | `feed/{id}`                            | A single feed              |
 | `user/-/label/{name}`                  | Folder/tag (FOLDER takes precedence) |
 | `user/-/search/{query}`                | FTS5 full-text search (extension) |
+
+> **Read vs history**: `user/-/state/com.google/read` returns every entry that has a read state, including those marked by bulk operations (`mark-all-as-read`); `user/-/state/farewell-rss/history` returns only entries that were **actually read**, i.e. their read state carries a timestamp. Both use the same sorting and pagination logic.
 
 > **About the search stream**: `user/-/search/{query}` uses SQLite FTS5 full-text search, supporting boolean expressions (`python OR go`), phrases (`"hello world"`), and column qualifiers (`title:python`). Search results are sorted by relevance (BM25); the `r` parameter is ignored. Pagination is controlled by `n` (limit) and `c` (continuation = offset in hex), compatible with regular streams.
 

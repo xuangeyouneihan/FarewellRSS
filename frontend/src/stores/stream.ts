@@ -219,7 +219,8 @@ export const useStreamStore = defineStore('stream', () => {
   async function toggleRead(itemId: string): Promise<void> {
     const item = findItem(itemId)
     if (!item) return
-    if (isRead(item)) {
+    const wasRead = isRead(item)
+    if (wasRead) {
       await greader.editTag([itemId], [], [STATE.read])
       updateItemCategories(itemId, [], [STATE.read])
     } else {
@@ -227,6 +228,10 @@ export const useStreamStore = defineStore('stream', () => {
       updateItemCategories(itemId, [STATE.read], [])
     }
     await useSubscriptionsStore().fetchUnreadCounts()
+    // 标为未读后条目不再属于「阅读历史」，当前视图是历史时刷新掉它
+    if (wasRead && currentStreamId.value === STATE.history) {
+      await loadStream(currentStreamId.value, currentType.value)
+    }
   }
 
   /** 收藏 / 取消收藏 */

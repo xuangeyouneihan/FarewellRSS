@@ -107,6 +107,30 @@ async def test_list_by_user(session, user, entry):
     assert set(result) == {rs1}
 
 
+async def test_list_history(session, user, entry):
+    """阅读历史只含 timestamp 非空的已读状态；批量标已读（timestamp=None）不算"""
+    repo = ReadStateRepository(session)
+
+    entry2 = Entry(
+        feed_id=entry.feed_id,
+        guid="guid-2",
+        title="文章 2",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    session.add(entry2)
+    await session.commit()
+
+    # entry 是真正读过的，entry2 只是被批量标了已读
+    rs_read = ReadState(
+        user_id=user.id, entry_id=entry.id, timestamp=datetime(1970, 1, 1, tzinfo=UTC)
+    )
+    rs_marked = ReadState(user_id=user.id, entry_id=entry2.id, timestamp=None)
+    session.add_all([rs_read, rs_marked])
+    await session.commit()
+
+    assert set(await repo.list_history(user.id)) == {rs_read}
+
+
 async def test_upsert(session, user, entry):
     repo = ReadStateRepository(session)
 

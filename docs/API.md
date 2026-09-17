@@ -167,9 +167,12 @@
 | `user/-/state/com.google/read`         | 已读                       |
 | `user/-/state/com.google/unread`       | 未读                       |
 | `user/-/state/farewell-rss/starred-uncategorized` | 未分类收藏（扩展）     |
+| `user/-/state/farewell-rss/history`    | 阅读历史（扩展）           |
 | `feed/{id}`                            | 单个订阅源                 |
 | `user/-/label/{name}`                  | 文件夹/标签（FOLDER 优先） |
 | `user/-/search/{query}`                | FTS5 全文搜索（扩展）      |
+
+> **已读 vs 阅读历史**：`user/-/state/com.google/read` 返回所有**有已读状态**的条目，包含批量操作（`mark-all-as-read`）标记的那些；`user/-/state/farewell-rss/history` 只返回**真正读过**的条目（已读状态带时间戳），也就是逐篇打开过的那种。两者排序与分页逻辑一致。
 
 > **搜索流说明**：`user/-/search/{query}` 使用 SQLite FTS5 全文搜索，支持布尔表达式（`python OR go`）、短语（`"hello world"`）、列限定（`title:python`）。搜索结果按相关性（BM25）排序，`r` 参数被忽略。分页通过 `n`（limit）和 `c`（continuation = offset 的 hex）控制，与普通流兼容。
 

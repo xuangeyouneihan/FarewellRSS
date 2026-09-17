@@ -815,6 +815,59 @@ async def test_starred_uncategorized(client: AsyncClient):
     assert "第一章" in items[0]["title"]
 
 
+async def test_read_history_stream(client: AsyncClient):
+    """历史流只含「真正读过」的条目；批量标已读（timestamp=None）不算读过"""
+    h = await _register(client)
+    await _subscribe(client, h)
+    ids = await _title_to_id(client, h)
+    entry1 = ids["《炒饭指南》第一章"]
+
+    # 批量标已读：写入 timestamp=None 的已读状态，不算真正读过
+    r = await client.post(
+        f"{BASE}/mark-all-as-read",
+        data={"s": "user/-/state/com.google/reading-list"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+    # 已读流有 3 条（含批量标的），历史流为空
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/com.google/read", headers=h
+    )
+    assert len(r.json()["items"]) == 3
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/farewell-rss/history", headers=h
+    )
+    assert r.json()["items"] == []
+
+    # 单独打开一条：edit-tag add read 会带时间戳 → 进入历史
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": entry1, "a": "user/-/state/com.google/read"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/farewell-rss/history", headers=h
+    )
+    items = r.json()["items"]
+    assert len(items) == 1
+    assert "第一章" in items[0]["title"]
+    assert "user/-/state/com.google/read" in items[0]["categories"]
+
+    # 再标记为未读：历史里这条也消失了
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": entry1, "r": "user/-/state/com.google/read"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/state/farewell-rss/history", headers=h
+    )
+    assert r.json()["items"] == []
+
+
 async def test_mark_all_as_read_type(client: AsyncClient):
     """mark-all-as-read 的 type 参数只标对应类型"""
     h = await _register(client)

@@ -132,6 +132,10 @@ async def _resolve_stream(
             if star_states:
                 entry_ids = [ss.entry_id for ss in star_states]
                 raw_entries = list((await entry_service.get_batch(entry_ids)).values())
+        case "user/-/state/farewell-rss/history":
+            # 阅读历史：只含「真正读过」的条目（timestamp 非空），排序与分页
+            # 沿用下面的通用逻辑，和 user/-/state/com.google/read 一致
+            raw_entries = await entry_service.list_by_read_history(user)
         case f if f.startswith("feed/"):
             feed = await feed_service.get(int(f[5:]))
             if not feed:

@@ -55,6 +55,7 @@ const moveSelectShow = ref(false);
 
 const systemStreams = computed(() => [
   { id: STATE.readingList, title: t("allArticles"), type: undefined as LabelType | undefined },
+  { id: STATE.history, title: t("history"), type: undefined as LabelType | undefined },
 ]);
 
 // 已收藏分组是否收起

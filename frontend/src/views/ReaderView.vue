@@ -116,6 +116,9 @@ watchEffect(() => {
   } else if (id === STATE.uncategorized) {
     name = t("uncategorized");
     withUnread = false;
+  } else if (id === STATE.history) {
+    name = t("history");
+    withUnread = false;
   } else if (id.startsWith("user/-/label/")) {
     name = labelName(id);
     // 收藏夹（type=tag）不带未读数；订阅分类（folder）带

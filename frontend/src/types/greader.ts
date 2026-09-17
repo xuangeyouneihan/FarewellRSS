@@ -9,6 +9,7 @@ export const STATE = {
   unread: 'user/-/state/com.google/unread',
   starred: 'user/-/state/com.google/starred',
   uncategorized: 'user/-/state/farewell-rss/starred-uncategorized',
+  history: 'user/-/state/farewell-rss/history',
 } as const
 
 /** label/{name} 前缀 */

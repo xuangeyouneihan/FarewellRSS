@@ -53,6 +53,16 @@ class ReadStateRepository:
         )
         return list(result.scalars().all())
 
+    async def list_history(self, user_id: int) -> list[ReadState]:
+        """列出用户的阅读历史：只有 timestamp 非空的才算「真正读过」"""
+        _logger.debug("列出用户 %d 的阅读历史", user_id)
+        result = await self._session.execute(
+            select(ReadState).where(
+                ReadState.user_id == user_id, ReadState.timestamp.isnot(None)
+            )
+        )
+        return list(result.scalars().all())
+
     async def upsert(
         self,
         user_id: int,
