@@ -20,7 +20,9 @@ class UTCDateTime(TypeDecorator):
     def process_bind_param(self, value: datetime | None, dialect):
         if value is not None:
             if value.tzinfo is None:
-                raise ValueError(f"必须传入带 UTC 时区的 datetime，收到 naive: {value!r}")
+                raise ValueError(
+                    f"必须传入带 UTC 时区的 datetime，收到 naive: {value!r}"
+                )
             if value.utcoffset() != UTC.utcoffset(None):
                 raise ValueError(f"只接受 UTC 时区，收到: {value!r}")
             return value.replace(tzinfo=None)
@@ -105,7 +107,9 @@ class Subscription(Base):
 
     __tablename__ = "subscriptions"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
-    feed_id: Mapped[int] = mapped_column(ForeignKey("feeds.id"), primary_key=True)
+    feed_id: Mapped[int] = mapped_column(
+        ForeignKey("feeds.id"), primary_key=True, index=True
+    )  # 索引用于按源统计订阅数（孤儿源清理每轮对每个源查一次）
     title: Mapped[str | None] = mapped_column(
         Text
     )  # 用户自定义的订阅标题，若为 None 则表示使用 RSS 源的标题
@@ -119,8 +123,8 @@ class Subscription(Base):
         bytes | None
     ]  # 用户自定义的订阅图标，存数据，让用户上传的图标可以在前端直接显示
     folder_id: Mapped[int | None] = mapped_column(
-        ForeignKey("labels.id")
-    )  # 所属文件夹 ID，若为 None 则表示未分类
+        ForeignKey("labels.id"), index=True
+    )  # 所属文件夹 ID，若为 None 则表示未分类；索引用于按文件夹列订阅
 
 
 class Entry(Base):
@@ -177,7 +181,9 @@ class ReadState(Base):
 
     __tablename__ = "read_states"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
-    entry_id: Mapped[int] = mapped_column(ForeignKey("entries.id"), primary_key=True)
+    entry_id: Mapped[int] = mapped_column(
+        ForeignKey("entries.id"), primary_key=True, index=True
+    )  # 索引用于按条目查已读状态（计数与清理）
     timestamp: Mapped[datetime | None] = mapped_column(
         UTCDateTime()
     )  # 若为 None 则表示标为已读但没有真正已读，不显示在历史记录里
@@ -189,8 +195,10 @@ class StarState(Base):
 
     __tablename__ = "star_states"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
-    entry_id: Mapped[int] = mapped_column(ForeignKey("entries.id"), primary_key=True)
+    entry_id: Mapped[int] = mapped_column(
+        ForeignKey("entries.id"), primary_key=True, index=True
+    )  # 索引用于按条目查收藏状态（计数与清理）
     tag_id: Mapped[int | None] = mapped_column(
-        ForeignKey("labels.id")
-    )  # 收藏时用户选择的标签 ID，若为 None 则表示未选择标签
+        ForeignKey("labels.id"), index=True
+    )  # 收藏时用户选择的标签 ID，若为 None 则表示未选择标签；索引用于按标签列收藏
     timestamp: Mapped[datetime] = mapped_column(UTCDateTime())

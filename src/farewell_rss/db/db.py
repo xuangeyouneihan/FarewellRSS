@@ -27,11 +27,25 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def init_db() -> None:
-    """创建所有表（含 FTS5 搜索索引）"""
+    """创建所有表、模型里声明的索引、以及 FTS5 搜索索引
+
+    幂等：老库每次启动都会重跑，缺失的索引会被补上。
+    """
     from .models import Base
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # create_all 只建「不存在的表」，对**已存在的表整张跳过**——所以老库拿不到
+        # 后来新增的索引。这里按名字把模型里声明的索引补建一遍（checkfirst 保证幂等），
+        # 于是索引的唯一声明处仍然只有模型，不必在别处重复写一遍 DDL。
+        def _create_missing_indexes(sync_conn) -> None:
+            for table in Base.metadata.sorted_tables:
+                for index in table.indexes:
+                    index.create(sync_conn, checkfirst=True)
+
+        await conn.run_sync(_create_missing_indexes)
+
         await conn.execute(
             text("""
             CREATE VIRTUAL TABLE IF NOT EXISTS entry_fts USING fts5(
