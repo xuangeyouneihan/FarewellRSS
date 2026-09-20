@@ -4,7 +4,17 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from farewell_rss.db.models import Base, Entry, Feed, ReadState, User
+from farewell_rss.db.models import (
+    Base,
+    Entry,
+    Feed,
+    Label,
+    LabelType,
+    ReadState,
+    StarState,
+    Subscription,
+    User,
+)
 from farewell_rss.db.repositories.read_state import ReadStateRepository
 
 
@@ -228,3 +238,90 @@ async def test_upsert_batch(session, user, entry):
     assert len(result) == 2
     assert result[entry.id].timestamp == ts
     assert result[entry2.id].timestamp == ts
+
+
+async def _add_entry(session, feed, guid: str) -> Entry:
+    entry = Entry(
+        feed_id=feed.id,
+        guid=guid,
+        title=guid,
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    session.add(entry)
+    await session.commit()
+    return entry
+
+
+async def test_unread_by_feed(session, user, feed):
+    """按源统计未读：最新未读条目是最新的「未读」条目，不是最新条目"""
+    repo = ReadStateRepository(session)
+    session.add(Subscription(user_id=user.id, feed_id=feed.id))
+    await session.commit()
+
+    await _add_entry(session, feed, "guid-1")
+    entry2 = await _add_entry(session, feed, "guid-2")
+    entry3 = await _add_entry(session, feed, "guid-3")
+
+    # 最新的一条已经读过，未读的是前两条 → 最新未读应当是 entry2
+    session.add(ReadState(user_id=user.id, entry_id=entry3.id))
+    await session.commit()
+
+    assert await repo.unread_by_feed(user.id) == {feed.id: (2, entry2.id)}
+
+
+async def test_unread_by_feed_ignores_fully_read_and_unsubscribed(session, user, feed):
+    """全部已读的源不算；没订阅的源即使有未读条目也不算"""
+    repo = ReadStateRepository(session)
+    session.add(Subscription(user_id=user.id, feed_id=feed.id))
+    other_feed = Feed(
+        href="https://example.com/other.xml",
+        title="另一个源",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    session.add(other_feed)
+    await session.commit()
+
+    read_entry = await _add_entry(session, feed, "guid-read")
+    session.add(ReadState(user_id=user.id, entry_id=read_entry.id))
+    await _add_entry(session, other_feed, "guid-other")
+    await session.commit()
+
+    assert await repo.unread_by_feed(user.id) == {}
+
+
+async def test_unread_by_tag_scoped_to_subscribed_feeds(session, user, feed):
+    """按标签统计未读：只算仍订阅的源里的未读收藏，纯收藏（tag_id 为空）不算"""
+    repo = ReadStateRepository(session)
+    session.add(Subscription(user_id=user.id, feed_id=feed.id))
+    other_feed = Feed(
+        href="https://example.com/other.xml",
+        title="另一个源",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    session.add(other_feed)
+    tag = Label(user_id=user.id, name="收藏夹", type=LabelType.TAG)
+    session.add(tag)
+    await session.commit()
+
+    starred_unread = await _add_entry(session, feed, "guid-1")
+    starred_read = await _add_entry(session, feed, "guid-2")
+    plain_star = await _add_entry(session, feed, "guid-3")
+    unsubscribed = await _add_entry(session, other_feed, "guid-4")
+
+    ts = datetime(1970, 1, 1, tzinfo=UTC)
+    session.add_all([
+        StarState(
+            user_id=user.id, entry_id=starred_unread.id, tag_id=tag.id, timestamp=ts
+        ),
+        StarState(
+            user_id=user.id, entry_id=starred_read.id, tag_id=tag.id, timestamp=ts
+        ),
+        StarState(user_id=user.id, entry_id=plain_star.id, tag_id=None, timestamp=ts),
+        StarState(
+            user_id=user.id, entry_id=unsubscribed.id, tag_id=tag.id, timestamp=ts
+        ),
+        ReadState(user_id=user.id, entry_id=starred_read.id),
+    ])
+    await session.commit()
+
+    assert await repo.unread_by_tag(user.id) == {tag.id: (1, starred_unread.id)}

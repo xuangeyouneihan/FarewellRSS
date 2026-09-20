@@ -1,10 +1,10 @@
 import logging
 from datetime import datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import ReadState
+from ..models import Entry, ReadState, StarState, Subscription
 from .entry import EntryRepository
 
 _logger = logging.getLogger(__name__)
@@ -168,3 +168,71 @@ class ReadStateRepository:
             .group_by(ReadState.entry_id)
         )
         return {row[0]: row[1] for row in result.all()}
+
+    async def unread_by_feed(self, user_id: int) -> dict[int, tuple[int, int]]:
+        """按订阅源统计未读：{feed_id: (未读数, 最新未读条目的 id)}
+
+        「未读」= 该源的条目里没有当前用户的已读状态，用 LEFT JOIN 反连接表达。
+        只返回未读数 > 0 的源（全已读的源不会出现在结果里）。
+        整个统计一条 SQL 完成，不再逐源取回条目。
+        """
+        _logger.debug("按源统计用户 %d 的未读数", user_id)
+        statement = (
+            select(
+                Subscription.feed_id,
+                func.count().label("unread"),
+                func.max(Entry.id).label("newest_id"),
+            )
+            .join(Entry, Entry.feed_id == Subscription.feed_id)
+            .outerjoin(
+                ReadState,
+                and_(
+                    ReadState.entry_id == Entry.id,
+                    ReadState.user_id == Subscription.user_id,
+                ),
+            )
+            .where(Subscription.user_id == user_id, ReadState.entry_id.is_(None))
+            .group_by(Subscription.feed_id)
+            .order_by(Subscription.feed_id)
+        )
+        result = await self._session.execute(statement)
+        return {row.feed_id: (row.unread, row.newest_id) for row in result.all()}
+
+    async def unread_by_tag(self, user_id: int) -> dict[int, tuple[int, int]]:
+        """按收藏标签统计未读：{tag_id: (未读数, 最新未读条目的 id)}
+
+        只统计**用户仍在订阅的源**里的条目：退订后保留的收藏不计入
+        （与旧实现一致）。另外 tag_id 为空的「纯收藏」不算未读来源。
+        """
+        _logger.debug("按标签统计用户 %d 的未读数", user_id)
+        statement = (
+            select(
+                StarState.tag_id,
+                func.count().label("unread"),
+                func.max(StarState.entry_id).label("newest_id"),
+            )
+            .join(Entry, Entry.id == StarState.entry_id)
+            .join(
+                Subscription,
+                and_(
+                    Subscription.feed_id == Entry.feed_id,
+                    Subscription.user_id == StarState.user_id,
+                ),
+            )
+            .outerjoin(
+                ReadState,
+                and_(
+                    ReadState.entry_id == Entry.id,
+                    ReadState.user_id == StarState.user_id,
+                ),
+            )
+            .where(
+                StarState.user_id == user_id,
+                StarState.tag_id.is_not(None),
+                ReadState.entry_id.is_(None),
+            )
+            .group_by(StarState.tag_id)
+            .order_by(StarState.tag_id)
+        )
+        result = await self._session.execute(statement)
+        return {row.tag_id: (row.unread, row.newest_id) for row in result.all()}

@@ -8,20 +8,16 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from ..db.models import LabelType, User
-from ..services.entry import EntryService
 from ..services.feed import FeedService
 from ..services.label import LabelService
 from ..services.read_state import ReadStateService
-from ..services.star_state import StarStateService
 from ..services.subscription import SubscriptionService
 from ._common import OutputType
 from .deps import (
     get_current_user,
-    get_entry_service,
     get_feed_service,
     get_label_service,
     get_read_state_service,
-    get_star_state_service,
     get_subscription_service,
     reject_xml,
 )
@@ -38,111 +34,62 @@ async def unread_count(
     subscription_service: Annotated[
         SubscriptionService, Depends(get_subscription_service)
     ],
-    feed_service: Annotated[FeedService, Depends(get_feed_service)],
-    entry_service: Annotated[EntryService, Depends(get_entry_service)],
     read_state_service: Annotated[ReadStateService, Depends(get_read_state_service)],
     label_service: Annotated[LabelService, Depends(get_label_service)],
-    star_state_service: Annotated[StarStateService, Depends(get_star_state_service)],
 ) -> dict:
-    """获取用户未读计数"""
+    """获取用户未读计数
+
+    计数全部在 SQL 里聚合（LEFT JOIN 反连接 + GROUP BY），这里只做
+    「按文件夹汇总」这一层很轻的收尾：参与汇总的只有未读 > 0 的源。
+    """
     subscriptions = await subscription_service.list_by_user(user=user)
-    feed_ids = [s.feed_id for s in subscriptions]
-    feed_map = await feed_service.get_batch(feed_ids)
     labels = await label_service.list_by_user(user=user)
     label_map = {label.id: label for label in labels}
-    star_states = await star_state_service.list_by_user(user)
+    unread_by_feed = await read_state_service.unread_by_feed(user)
+    unread_by_tag = await read_state_service.unread_by_tag(user)
 
     feed_unread_counts: list[dict] = []
-    folder_unread_counts: list[dict] = []
-    tag_unread_counts: list[dict] = []
+    # folder_id -> [未读数, 最新未读条目 id]
+    folder_totals: dict[int, list[int]] = {}
     total_unread = 0
     overall_newest_id = 0
 
     for sub in subscriptions:
-        feed = feed_map.get(sub.feed_id)
-        if not feed:
-            continue
+        counts = unread_by_feed.get(sub.feed_id)
+        if counts is None:
+            continue  # 没有未读的源不出现在结果里
+        unread, newest_id = counts
 
-        entries = await entry_service.list_by_feed(feed)
-        entry_ids = sorted(
-            [entry.id for entry in entries],
-            reverse=True,
-        )
-
-        read_entry_ids = {
-            s.entry_id
-            for s in await read_state_service.list_by_subscription(user.id, feed.id)
-        }
-
-        star_state_map = {
-            s.entry_id: s for s in star_states if s.entry_id in set(entry_ids)
-        }
-
-        unread = len(entry_ids) - len(read_entry_ids)
-        if unread <= 0:
-            continue
-
-        newest_id = 0
-        for entry_id in entry_ids:
-            if entry_id not in read_entry_ids:
-                newest_id = entry_id
-                break
-
+        total_unread += unread
         overall_newest_id = max(overall_newest_id, newest_id)
-
         feed_unread_counts.append({
-            "id": f"feed/{feed.id}",
+            "id": f"feed/{sub.feed_id}",
             "count": unread,
             "newestItemTimestampUsec": str(newest_id),
         })
-        total_unread += unread
 
-        if sub.folder_id is not None:
-            label = label_map.get(sub.folder_id)
-            if label:
-                existing = next(
-                    (
-                        x
-                        for x in folder_unread_counts
-                        if x["id"] == f"user/-/label/{label.name}"
-                    ),
-                    None,
-                )
-                if existing:
-                    existing["count"] += unread
-                    existing["newestItemTimestampUsec"] = str(
-                        max(int(existing["newestItemTimestampUsec"]), newest_id)
-                    )
-                else:
-                    folder_unread_counts.append({
-                        "id": f"user/-/label/{label.name}",
-                        "count": unread,
-                        "newestItemTimestampUsec": str(newest_id),
-                    })
+        if sub.folder_id is not None and sub.folder_id in label_map:
+            folder_total = folder_totals.setdefault(sub.folder_id, [0, 0])
+            folder_total[0] += unread
+            folder_total[1] = max(folder_total[1], newest_id)
 
-        for entry_id, star_state in star_state_map.items():
-            if star_state.tag_id is not None and entry_id not in read_entry_ids:
-                tag = label_map.get(star_state.tag_id)
-                if tag:
-                    existing = next(
-                        (
-                            x
-                            for x in tag_unread_counts
-                            if x["id"] == f"user/-/label/{tag.name}"
-                        ),
-                        None,
-                    )
-                    if existing:
-                        existing["count"] += 1
-                        existing["newestItemTimestampUsec"] = str(
-                            max(int(existing["newestItemTimestampUsec"]), entry_id)
-                        )
-                    else:
-                        tag_unread_counts.append({
-                            "id": f"user/-/label/{tag.name}",
-                            "count": 1,
-                            "newestItemTimestampUsec": str(entry_id),
-                        })
+    folder_unread_counts = [
+        {
+            "id": f"user/-/label/{label_map[folder_id].name}",
+            "count": folder_total[0],
+            "newestItemTimestampUsec": str(folder_total[1]),
+        }
+        for folder_id, folder_total in folder_totals.items()
+    ]
+    tag_unread_counts = [
+        {
+            "id": f"user/-/label/{label_map[tag_id].name}",
+            "count": unread,
+            "newestItemTimestampUsec": str(newest_id),
+        }
+        for tag_id, (unread, newest_id) in unread_by_tag.items()
+        if tag_id in label_map
+    ]
 
     unread_counts = (
         [

@@ -31,6 +31,14 @@ class ReadStateService:
         """用户的阅读历史（timestamp 非空的已读状态）"""
         return await self._repository.list_history(user.id)
 
+    async def unread_by_feed(self, user: User) -> dict[int, tuple[int, int]]:
+        """按订阅源统计未读：{feed_id: (未读数, 最新未读条目 id)}"""
+        return await self._repository.unread_by_feed(user.id)
+
+    async def unread_by_tag(self, user: User) -> dict[int, tuple[int, int]]:
+        """按收藏标签统计未读：{tag_id: (未读数, 最新未读条目 id)}"""
+        return await self._repository.unread_by_tag(user.id)
+
     async def upsert(
         self,
         user: User,
