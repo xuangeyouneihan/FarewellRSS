@@ -1,7 +1,6 @@
 import logging
-from datetime import datetime
 
-from ..db.models import Entry, Feed
+from ..db.models import Feed
 from ..db.repositories.feed import FeedRepository
 from ..feed_fetcher.feed_fetcher import FetchError, fetch
 from .entry import EntryService
@@ -63,9 +62,3 @@ class FeedService:
             "订阅源 %s（%s）已被清理但未为空，保留该订阅源", feed.title, feed.href
         )
         return feed
-
-    async def list_entries(
-        self, feed: Feed, start: datetime | None = None, end: datetime | None = None
-    ) -> list[Entry]:
-        entries = await self._entry_service.list_by_feed(feed, start, end)
-        return entries

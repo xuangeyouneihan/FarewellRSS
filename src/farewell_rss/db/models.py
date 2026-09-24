@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from enum import Enum
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -159,8 +159,19 @@ class Entry(Base):
         ForeignKey("feeds.id")
     )  # 聚合源中文章的原始来源的 RSS 条目 ID，目前暂时忽略
     __table_args__ = (
-        UniqueConstraint("feed_id", "guid"),
-    )  # 约束同一个 RSS 源下的条目 guid 唯一
+        UniqueConstraint("feed_id", "guid"),  # 约束同一个 RSS 源下的条目 guid 唯一
+        # 索引表达式必须和 repository 里的排序键逐字一致（unixepoch(coalesce(...)), id），
+        # 否则 ORDER BY 用不上索引，会退化成临时 B 树排序。索引表达式里不能写 table.
+        # 前缀，所以这里是不带限定名的裸列名。
+        Index(
+            "ix_entries_page",
+            text("unixepoch(coalesce(published, updated, fetched)), id"),
+        ),
+        Index(
+            "ix_entries_feed_id",
+            text("feed_id, unixepoch(coalesce(published, updated, fetched)), id"),
+        ),
+    )
 
 
 class Enclosure(Base):

@@ -62,13 +62,11 @@ def build_services(session: AsyncSession) -> ServiceBundle:
         repository=SubscriptionRepository(session=session),
         feed_service=feed,
         read_state_service=read_state,
-        star_state_service=star_state,
     )
     label = LabelService(
         repository=LabelRepository(session=session),
         subscription_service=subscription,
         star_state_service=star_state,
-        entry_service=entry,
     )
     read_batch = ReadBatchService(
         read_state_service=read_state,

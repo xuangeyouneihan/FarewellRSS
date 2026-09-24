@@ -15,6 +15,9 @@ async def session():
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         yield session
+    # 必须 dispose：否则 aiosqlite 的连接工作线程会在测试的 event loop
+    # 关闭之后才去交付结果，报 "RuntimeError: Event loop is closed"
+    await engine.dispose()
 
 
 @pytest_asyncio.fixture

@@ -139,6 +139,9 @@ async def client(monkeypatch):
         yield ac
 
     app.dependency_overrides.clear()
+    # 必须 dispose：否则 aiosqlite 的连接工作线程会在测试的 event loop
+    # 关闭之后才去交付结果，报 "RuntimeError: Event loop is closed"
+    await test_engine.dispose()
 
 
 def _auth(text: str) -> str:

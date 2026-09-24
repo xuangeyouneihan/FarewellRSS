@@ -1,12 +1,9 @@
 import logging
-from datetime import datetime
 
-from ..db.models import Entry, Feed, Label, Subscription, User
+from ..db.models import Feed, Label, Subscription, User
 from ..db.repositories.subscription import SubscriptionRepository
-from .__init__ import Filtering
 from .feed import FeedService
 from .read_state import ReadStateService
-from .star_state import StarStateService
 
 _logger = logging.getLogger(__name__)
 
@@ -17,12 +14,10 @@ class SubscriptionService:
         repository: SubscriptionRepository,
         feed_service: FeedService,
         read_state_service: ReadStateService,
-        star_state_service: StarStateService,
     ):
         self._repository = repository
         self._feed_service = feed_service
         self._read_state_service = read_state_service
-        self._star_state_service = star_state_service
 
     async def get(self, user: User, feed: Feed) -> Subscription | None:
         return await self._repository.get(user.id, feed.id)
@@ -59,6 +54,8 @@ class SubscriptionService:
             folder_id,
         )
         feed = await self._feed_service.insert_by_href(feed_href)
+        if feed is None:
+            raise ValueError(f"无法通过 href 插入或获取订阅源: {feed_href}")
         return await self._repository.upsert(
             user_id=user.id,
             feed_id=feed.id,
@@ -133,61 +130,3 @@ class SubscriptionService:
 
     async def subscription_count(self, feed: Feed) -> int:
         return await self._repository.subscription_count(feed.id)
-
-    async def list_entries(
-        self,
-        subscription: Subscription,
-        start: datetime | None = None,
-        end: datetime | None = None,
-        include: Filtering | None = None,
-        exclude: Filtering | None = None,
-    ) -> list[Entry]:
-        _logger.debug(
-            "列出用户 %d 订阅源 %d 的条目，时间范围 %s 到 %s，包含 %s，排除 %s",
-            subscription.user_id,
-            subscription.feed_id,
-            start,
-            end,
-            include,
-            exclude,
-        )
-        feed = await self._feed_service.get(subscription.feed_id)
-        if not feed:
-            return []
-        raw = await self._feed_service.list_entries(feed, start, end)
-        read_states = await self._read_state_service.list_by_subscription(
-            subscription.user_id, subscription.feed_id
-        )
-        read_set = {rs.entry_id for rs in read_states}
-        star_states = await self._star_state_service.list_by_subscription(
-            subscription.user_id, subscription.feed_id
-        )
-        star_set = {ss.entry_id for ss in star_states}
-        result = []
-        if (include, exclude) in [
-            (Filtering.READ, None),
-            (None, Filtering.UNREAD),
-            (Filtering.READ, Filtering.UNREAD),
-        ]:
-            for entry in raw:
-                if entry.id in read_set:
-                    result.append(entry)
-        elif (include, exclude) in [
-            (Filtering.UNREAD, None),
-            (None, Filtering.READ),
-            (Filtering.UNREAD, Filtering.READ),
-        ]:
-            for entry in raw:
-                if entry.id not in read_set:
-                    result.append(entry)
-        elif (include, exclude) == (Filtering.STARRED, None):
-            for entry in raw:
-                if entry.id in star_set:
-                    result.append(entry)
-        elif (include, exclude) == (None, Filtering.STARRED):
-            for entry in raw:
-                if entry.id not in star_set:
-                    result.append(entry)
-        else:
-            result = raw
-        return result

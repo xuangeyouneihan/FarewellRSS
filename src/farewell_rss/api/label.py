@@ -242,8 +242,8 @@ async def rename_label(
         labels.append((label, new_id[13:]))
 
     existing_name_types = {(label.name, label.type) for label in all_labels}
-    old_name_type_counts = {}
-    new_name_type_counts = {}
+    old_name_type_counts: dict[tuple[str, LabelType], int] = {}
+    new_name_type_counts: dict[tuple[str, LabelType], int] = {}
     for label, new_name in labels:
         old_name_type_counts[(label.name, label.type)] = (
             old_name_type_counts.get((label.name, label.type), 0) + 1
@@ -273,13 +273,13 @@ async def rename_label(
         )
 
     existing_names = {label.name for label in all_labels}
-    temp_names = set()
-    while len(temp_names) < len(labels):
+    temp_names_set: set[str] = set()
+    while len(temp_names_set) < len(labels):
         temp_name = f"temp_{uuid4().hex}"
-        while temp_name in existing_names or temp_name in temp_names:
+        while temp_name in existing_names or temp_name in temp_names_set:
             temp_name = f"temp_{uuid4().hex}"
-        temp_names.add(temp_name)
-    temp_names = list(temp_names)
+        temp_names_set.add(temp_name)
+    temp_names = list(temp_names_set)
 
     for i, (label, _) in enumerate(labels):
         temp_name = temp_names[i]

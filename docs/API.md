@@ -149,8 +149,8 @@
 | ------ | ---------------------------------- |
 | `n`  | 返回条目数（默认 20）              |
 | `r`  | 排序：`n`/`d` 降序，`o` 升序（按条目有效时间戳 + id） |
-| `ot` | 起始时间戳（秒）                   |
-| `nt` | 结束时间戳（秒）                   |
+| `ot` | 起始时间戳（秒），闭区间下界（含）   |
+| `nt` | 结束时间戳（秒），闭区间上界（含，涵盖整个第 `nt` 秒） |
 | `c`  | 分页 continuation（32 位 hex：16 位时间戳 + 16 位 id） |
 | `xt` | 排除标签                           |
 | `it` | 仅含标签                           |
@@ -160,23 +160,39 @@
 
 支持的流路径：
 
-| path                                     | 说明                       |
-| ---------------------------------------- | -------------------------- |
-| `user/-/state/com.google/reading-list` | 全部                       |
-| `user/-/state/com.google/starred`      | 已收藏                     |
-| `user/-/state/com.google/read`         | 已读                       |
-| `user/-/state/com.google/unread`       | 未读                       |
-| `user/-/state/farewell-rss/starred-uncategorized` | 未分类收藏（扩展）     |
-| `user/-/state/farewell-rss/history`    | 阅读历史（扩展）           |
-| `feed/{id}`                            | 单个订阅源                 |
-| `user/-/label/{name}`                  | 文件夹/标签（FOLDER 优先） |
-| `user/-/search/{query}`                | FTS5 全文搜索（扩展）      |
+| path                                     | 说明                       | 范围                     |
+| ---------------------------------------- | -------------------------- | ------------------------ |
+| `user/-/state/com.google/reading-list` | 全部                       | 仅当前订阅               |
+| `user/-/state/com.google/starred`      | 已收藏                     | 全部（含已退订的源）     |
+| `user/-/state/com.google/read`         | 已读                       | 全部（含已退订的源）     |
+| `user/-/state/com.google/unread`       | 未读                       | 仅当前订阅               |
+| `user/-/state/farewell-rss/starred-uncategorized` | 未分类收藏（扩展）     | 全部（含已退订的源） |
+| `user/-/state/farewell-rss/history`    | 阅读历史（扩展）           | 全部（含已退订的源）     |
+| `feed/{id}`                            | 单个订阅源                 | 仅当前订阅               |
+| `user/-/label/{name}`                  | 文件夹/标签（FOLDER 优先） | folder：仅当前订阅；tag：全部（含已退订的源） |
+| `user/-/search/{query}`                | FTS5 全文搜索（扩展）      | 库内全部条目（不受订阅限制） |
+
+> **「范围」的含义，以及两对不再互补的流**：退订（`subscription/edit` 的 `ac=unsubscribe`）只删除订阅关系，并丢弃「标为已读但从没打开过」的状态（`ReadState.timestamp IS NULL`）；**真正读过的历史（`ReadState` 带 timestamp）和收藏（`StarState`）都会保留**，对应条目在孤儿源清理时也会被留下。于是上表分两类：
+>
+> - **按当前订阅算**：`reading-list`、`unread`、`feed/{id}`，以及 `user/-/label/{name}` 的 folder 形态。
+> - **按用户全部数据算（含已退订的源）**：`read`、`starred`、`starred-uncategorized`、`history`，以及 `user/-/label/{name}` 的 tag 形态。
+>
+> 由此有两对流**不再互补**，客户端不要拿它们做对账：
+>
+> | 看起来该互补 | 实际情况 |
+> | --- | --- |
+> | `read` + `unread` | 退订源的已读条目只在 `read` 里，既不在 `unread` 也不在 `reading-list`（所以 `read + unread ≠ 全部条目`） |
+> | `starred` + （`reading-list` 上 `xt=starred` 的「未收藏」） | 退订源的收藏条目只在 `starred` 里，不出现在阅读列表的「未收藏」里 |
+>
+> 换句话说：**已读/收藏是「读过什么 / 收藏过什么」的账本，不随退订消失；而阅读列表和未读是「现在订阅里有什么」的视图**。
 
 > **已读 vs 阅读历史**：`user/-/state/com.google/read` 返回所有**有已读状态**的条目，包含批量操作（`mark-all-as-read`）标记的那些；`user/-/state/farewell-rss/history` 只返回**真正读过**的条目（已读状态带时间戳），也就是逐篇打开过的那种。两者排序与分页逻辑一致。
 
 > **搜索流说明**：`user/-/search/{query}` 使用 SQLite FTS5 全文搜索，支持布尔表达式（`python OR go`）、短语（`"hello world"`）、列限定（`title:python`）。搜索结果按相关性（BM25）排序，`r` 参数被忽略。分页通过 `n`（limit）和 `c`（continuation = offset 的 hex）控制，与普通流兼容。
 
 > **排序与分页说明**：条目按「有效时间戳」（`published > updated > fetched` 取其一，秒级）+ 自增 id 排序；`o` 为时间升序（最旧在前），`n`/`d` 为降序（最新在前）。continuation 为 32 位 hex，前 16 位是排序时间戳、后 16 位是条目 id，作为复合分页锚点——同一秒有多条时按 id 精确切分，不重不漏。搜索流除外（见下）。
+>
+> **时间范围说明**：`ot`/`nt` 的比较也在秒级、且都是闭区间（`有效时间戳 >= ot` 且 `<= nt`）；注意 `nt` 涵盖**整个第 `nt` 秒**。微秒不参与排序和分页，只出现在 item 的 `crawlTimeMsec` / `timestampUsec` 两个展示字段里。
 >
 > **与 Google Reader 和 FreshRSS 的差异**：continuation 使用 hex 格式（Google Reader 标准），FreshRSS 使用十进制；告别 RSS 采用 hex，并额外携带「时间戳 + id」复合锚点。告别 RSS 新增搜索流以支持全文搜索。
 
@@ -235,6 +251,8 @@
 - `subscribe`：`s` 中 feed 部分为 URL
 - `unsubscribe` / `edit`：`s` 中 feed 部分为数字 ID
 - `a` 的标签不存在时自动创建为 FOLDER 类型
+
+> **`unsubscribe` 会删掉什么、留下什么**：只删除订阅关系，并丢弃该源下「标为已读但从没打开过」的状态（`ReadState.timestamp IS NULL`）；**真正读过的历史（带 timestamp 的 `ReadState`）和收藏（`StarState`）都保留**，对应条目在孤儿源清理时也会被留下。所以退订之后，该源的已读/收藏条目**仍然出现在 `read`、`starred`、`history` 等流里**，但不再出现在 `reading-list`、`unread` 里 —— 详见「流」一节的「范围」说明。
 
 ### subscription/quickadd
 
@@ -360,7 +378,7 @@
 
 支持的 `s` 值：`feed/{id}`、`user/-/label/{name}`、`reading-list`、`starred`。
 
-已读状态通过 `ReadState` 插入实现，timestamp 为 `None`（批量操作不进入阅读历史）。已有的 ReadState 不会被覆盖。
+已读状态通过 `ReadState` 插入实现，timestamp 为 `None`（批量操作不进入阅读历史）。已有的 ReadState 不会被覆盖；退订该源时这些状态会被一并丢弃（真实阅读历史保留），见「流」一节的「范围」说明。
 
 ### token
 

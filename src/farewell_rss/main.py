@@ -148,15 +148,16 @@ if _FRONTEND_DIST:
     @app.get("/{full_path:path}", include_in_schema=False)
     async def _spa(full_path: str = ""):
         """SPA fallback：/api 走 API，其余路径返回 index.html（Vue Router history 模式）"""
-        # 兜底：/api 开头但没匹配到 API 路由的，返回 404 而不是 index.html
-        if full_path.startswith("api/") or full_path == "api":
-            raise HTTPException(status_code=404, detail="Not Found")
-        # 静态文件（favicon 等在 dist 根目录）存在则直接返回
-        if full_path:
-            candidate = os.path.join(_FRONTEND_DIST, full_path)
-            if os.path.isfile(candidate):
-                return FileResponse(candidate)
-        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
+        if _FRONTEND_DIST:
+            # 兜底：/api 开头但没匹配到 API 路由的，返回 404 而不是 index.html
+            if full_path.startswith("api/") or full_path == "api":
+                raise HTTPException(status_code=404, detail="Not Found")
+            # 静态文件（favicon 等在 dist 根目录）存在则直接返回
+            if full_path:
+                candidate = os.path.join(_FRONTEND_DIST, full_path)  # noqa: arg-type
+                if os.path.isfile(candidate):
+                    return FileResponse(candidate)
+            return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
 
     _logger.info("前端静态文件目录: %s", _FRONTEND_DIST)
 else:

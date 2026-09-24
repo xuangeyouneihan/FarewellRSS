@@ -1,7 +1,6 @@
 """Google Reader API 文章流端点"""
 
 import logging
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from time import time
 from typing import Annotated
@@ -9,14 +8,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, status
 
 from ..db.models import Entry, LabelType, User
-from ..services import Filtering
+from ..enums import Filtering, SortOrder
 from ..services.entry import EntryService
 from ..services.feed import FeedService
 from ..services.label import LabelService
 from ..services.read_state import ReadStateService
 from ..services.star_state import StarStateService
 from ..services.subscription import SubscriptionService
-from ..services.user import UserService
 from ._common import OutputType, Sorting, parse_item_ids
 from .deps import (
     get_current_user,
@@ -26,7 +24,6 @@ from .deps import (
     get_read_state_service,
     get_star_state_service,
     get_subscription_service,
-    get_user_service,
     reject_xml,
 )
 
@@ -79,66 +76,105 @@ async def _resolve_stream(
     r: Sorting,
     c: str | None,
     n: int,
-    user_service: UserService,
     feed_service: FeedService,
     subscription_service: SubscriptionService,
     label_service: LabelService,
-    star_state_service: StarStateService,
     entry_service: EntryService,
 ) -> tuple[list[Entry], str | None]:
-    """解析流路径并返回分页后的条目列表和 continuation"""
-    raw_entries: list[Entry] = []
+    """解析流路径并返回分页后的条目列表和 continuation
 
+    过滤、排序、分页都由各条流自己下推到 SQL，这里只负责把多取的那一条切掉、
+    生成 continuation。
+    """
     include = FILTERING_MAP.get(it) if it else None
     exclude = FILTERING_MAP.get(xt) if xt else None
-    start = datetime.fromtimestamp(ot, tz=UTC) if ot else None
-    end = datetime.fromtimestamp(nt, tz=UTC) if nt else None
+    start = datetime.fromtimestamp(ot, tz=UTC) if ot is not None else None
+    end = datetime.fromtimestamp(nt, tz=UTC) if nt is not None else None
+
+    # continuation 解出来就是 (秒级时间戳, 条目 id)。repository 的排序、过滤、游标
+    # 比较全在「秒」这一层，所以原样下传即可，不必再绕成 datetime——绕一圈不仅把秒
+    # 又转回来，还得依赖 sqlite3 那个 3.12 起已废弃的 datetime 适配器。
+    cursor = _decode_continuation(c) if c else None
+
+    entries: list[Entry]
+    sorting = (
+        SortOrder.DESCENDING
+        if r == Sorting.NEWEST_FIRST or r == Sorting.NEWEST_FIRST_ALT
+        else SortOrder.ASCENDING
+    )
 
     match s:
         case "user/-/state/com.google/reading-list":
-            raw_entries = await user_service.list_entries(
-                user=user,
+            entries = await entry_service.list_reading_list(
+                user_id=user.id,
                 start=start,
                 end=end,
                 include=include,
                 exclude=exclude,
+                sorting=sorting,
+                cursor=cursor,
+                limit=n + 1,
             )
         case "user/-/state/com.google/starred":
-            raw_entries = await user_service.list_entries(
-                user=user,
+            entries = await entry_service.list_starred(
+                user_id=user.id,
                 start=start,
                 end=end,
-                include=Filtering.STARRED,
-                exclude=None,
+                include=include,
+                exclude=exclude,
+                sorting=sorting,
+                cursor=cursor,
+                limit=n + 1,
             )
         case "user/-/state/com.google/read":
-            raw_entries = await user_service.list_entries(
-                user=user,
+            entries = await entry_service.list_read(
+                user_id=user.id,
                 start=start,
                 end=end,
-                include=Filtering.READ,
-                exclude=None,
+                include=include,
+                exclude=exclude,
+                sorting=sorting,
+                cursor=cursor,
+                limit=n + 1,
             )
         case "user/-/state/com.google/unread":
-            raw_entries = await user_service.list_entries(
-                user=user,
+            entries = await entry_service.list_reading_list(
+                user_id=user.id,
                 start=start,
                 end=end,
                 include=Filtering.UNREAD,
-                exclude=None,
+                exclude=exclude,
+                sorting=sorting,
+                cursor=cursor,
+                limit=n + 1,
             )
         case "user/-/state/farewell-rss/starred-uncategorized":
-            star_states = await star_state_service.list_uncategorized(user)
-            if star_states:
-                entry_ids = [ss.entry_id for ss in star_states]
-                raw_entries = list((await entry_service.get_batch(entry_ids)).values())
+            entries = await entry_service.list_starred(
+                user_id=user.id,
+                start=start,
+                end=end,
+                include=include,
+                exclude=exclude,
+                sorting=sorting,
+                cursor=cursor,
+                limit=n + 1,
+                uncategorized=True,
+            )
         case "user/-/state/farewell-rss/history":
-            # 阅读历史：只含「真正读过」的条目（timestamp 非空），排序与分页
-            # 沿用下面的通用逻辑，和 user/-/state/com.google/read 一致
-            raw_entries = await entry_service.list_by_read_history(user)
+            entries = await entry_service.list_read(
+                user_id=user.id,
+                start=start,
+                end=end,
+                include=include,
+                exclude=exclude,
+                sorting=sorting,
+                cursor=cursor,
+                limit=n + 1,
+                history=True,
+            )
         case f if f.startswith("feed/"):
             feed = await feed_service.get(int(f[5:]))
-            if not feed:
+            if not feed or (await subscription_service.get(user, feed)) is None:
                 _logger.warning(
                     "用户 %s（%d）尝试获取订阅源 %s 下的条目时，未找到该订阅源",
                     user.username,
@@ -149,12 +185,16 @@ async def _resolve_stream(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={"code": "FeedNotFound", "detail": f"未找到订阅源: {f[5:]}"},
                 )
-            raw_entries = await subscription_service.list_entries(
-                subscription=await subscription_service.get(user, feed),
+            entries = await entry_service.list_by_feed(
+                feed,
+                user_id=user.id,
                 start=start,
                 end=end,
                 include=include,
                 exclude=exclude,
+                sorting=sorting,
+                cursor=cursor,
+                limit=n + 1,
             )
         case l if l.startswith("user/-/label/"):
             if type == LabelType.TAG:
@@ -184,21 +224,42 @@ async def _resolve_stream(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={"code": "LabelNotFound", "detail": f"未找到标签: {l[13:]}"},
                 )
-            raw_entries = await label_service.list_entries(
-                label=label,
-                start=start,
-                end=end,
-                include=include,
-                exclude=exclude,
-            )
+            # 标签流 = 带这个标签的收藏 → 和 starred 流一样不按订阅过滤；
+            # 文件夹流 = 该文件夹下的订阅 → 和 reading-list 一样按订阅过滤
+            if label.type == LabelType.TAG:
+                entries = await entry_service.list_starred(
+                    user_id=user.id,
+                    start=start,
+                    end=end,
+                    include=include,
+                    exclude=exclude,
+                    sorting=sorting,
+                    cursor=cursor,
+                    limit=n + 1,
+                    tag_id=label.id,
+                )
+            else:
+                entries = await entry_service.list_reading_list(
+                    user_id=user.id,
+                    start=start,
+                    end=end,
+                    include=include,
+                    exclude=exclude,
+                    sorting=sorting,
+                    cursor=cursor,
+                    limit=n + 1,
+                    folder_id=label.id,
+                )
         case q if q.startswith("user/-/search/"):
+            # 搜索走 FTS5 的 rank 排序 + OFFSET 分页，和上面那套 keyset 分页不是一回事，
+            # 所以自己算 continuation 并提前返回
             offset = int(c, 16) if c else 0
-            raw_entries = await entry_service.search(q[14:], limit=n + 1, offset=offset)
+            found = await entry_service.search(q[14:], limit=n + 1, offset=offset)
             continuation = None
-            if len(raw_entries) > n:
+            if len(found) > n:
                 continuation = f"{offset + n:016x}"
-                raw_entries = raw_entries[:n]
-            return raw_entries, continuation
+                found = found[:n]
+            return found, continuation
         case _:
             _logger.warning(
                 "用户 %s（%d）尝试获取无效的流 ID %s 下的条目",
@@ -211,29 +272,18 @@ async def _resolve_stream(
                 detail={"code": "InvalidStreamID", "detail": f"无效的流 ID: {s}"},
             )
 
-    raw_entries.sort(
-        key=_entry_sort_key,
-        reverse=(r != Sorting.OLDEST_FIRST),
-    )
-
-    if c:
-        cursor = _decode_continuation(c)
-        if cursor is not None:
-            if r == Sorting.OLDEST_FIRST:
-                raw_entries = [e for e in raw_entries if _entry_sort_key(e) > cursor]
-            else:
-                raw_entries = [e for e in raw_entries if _entry_sort_key(e) < cursor]
-
+    # 各条流都已经把过滤、排序、游标下推到 SQL 了，这里只剩「多取一条判断还有没有
+    # 下一页」：continuation 取这一页的最后一条，下一页从它后面接着取。
     continuation = None
-    if len(raw_entries) > n:
-        continuation = _encode_continuation(raw_entries[n - 1])
-        raw_entries = raw_entries[:n]
+    if len(entries) > n:
+        continuation = _encode_continuation(entries[n - 1])
+        entries = entries[:n]
 
-    return raw_entries, continuation
+    return entries, continuation
 
 
 async def _build_items(
-    entries: Sequence[Entry],
+    entries: list[Entry],
     user: User,
     feed_service: FeedService,
     subscription_service: SubscriptionService,
@@ -269,8 +319,11 @@ async def _build_items(
             categories.append("user/-/state/com.google/starred")
         if folder:
             categories.append(f"user/-/label/{folder.name}")
-        if entry.id in star_state_map and star_state_map[entry.id].tag_id is not None:
-            tag = await label_service.get(star_state_map[entry.id].tag_id)
+        # 取出局部变量再判空：直接写 star_state_map[entry.id].tag_id，mypy 没法
+        # 穿过字典取值把 int | None 收窄成 int
+        star_state = star_state_map.get(entry.id)
+        if star_state is not None and star_state.tag_id is not None:
+            tag = await label_service.get(star_state.tag_id)
             if tag:
                 categories.append(f"user/-/label/{tag.name}")
 
@@ -307,7 +360,6 @@ async def stream_contents(
     s: str,  # 流 ID，如 user/-/state/com.google/reading-list
     user: Annotated[User, Depends(get_current_user)],
     output: Annotated[OutputType, Depends(reject_xml)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
     feed_service: Annotated[FeedService, Depends(get_feed_service)],
     subscription_service: Annotated[
         SubscriptionService, Depends(get_subscription_service)
@@ -342,11 +394,9 @@ async def stream_contents(
         r=r,
         c=c,
         n=n,
-        user_service=user_service,
         feed_service=feed_service,
         subscription_service=subscription_service,
         label_service=label_service,
-        star_state_service=star_state_service,
         entry_service=entry_service,
     )
     items = await _build_items(
@@ -368,13 +418,11 @@ async def stream_contents(
 async def stream_items_ids(
     user: Annotated[User, Depends(get_current_user)],
     output: Annotated[OutputType, Depends(reject_xml)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
     feed_service: Annotated[FeedService, Depends(get_feed_service)],
     subscription_service: Annotated[
         SubscriptionService, Depends(get_subscription_service)
     ],
     label_service: Annotated[LabelService, Depends(get_label_service)],
-    star_state_service: Annotated[StarStateService, Depends(get_star_state_service)],
     entry_service: Annotated[EntryService, Depends(get_entry_service)],
     s: Annotated[str, Query()],  # 流 ID，如 user/-/state/com.google/reading-list
     type: Annotated[
@@ -403,11 +451,9 @@ async def stream_items_ids(
         r=r,
         c=c,
         n=n,
-        user_service=user_service,
         feed_service=feed_service,
         subscription_service=subscription_service,
         label_service=label_service,
-        star_state_service=star_state_service,
         entry_service=entry_service,
     )
     result: dict = {
@@ -433,11 +479,8 @@ async def stream_items_contents(
     i: Annotated[list[str], Form()],
 ) -> dict:
     entry_ids = parse_item_ids(i)
-    entries = [
-        e
-        for eid in entry_ids
-        if (e := (await entry_service.get_batch(entry_ids)).get(eid)) is not None
-    ]
+    entry_map = await entry_service.get_batch(entry_ids)
+    entries = [e for eid in entry_ids if (e := entry_map.get(eid)) is not None]
     items = await _build_items(
         entries,
         user,

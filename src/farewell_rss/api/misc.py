@@ -128,8 +128,8 @@ async def export_opml(
 
     # 按文件夹分组
     grouped: dict[int | None, list] = {None: []}
-    for folder_id in folder_map:
-        grouped[folder_id] = []
+    for folder_id_1 in folder_map:
+        grouped[folder_id_1] = []
     for sub in subscriptions:
         feed = feed_map.get(sub.feed_id)
         if not feed:
@@ -142,14 +142,14 @@ async def export_opml(
     ET.SubElement(head, "title").text = "FarewellRSS 订阅列表"
     body = ET.SubElement(opml, "body")
 
-    for folder_id, items in grouped.items():
+    for folder_id_2, items in grouped.items():
         if not items:
             continue
-        if folder_id is None:
+        if folder_id_2 is None:
             for sub, feed in items:
                 _make_outline(body, sub, feed)
         else:
-            folder_el = ET.SubElement(body, "outline", text=folder_map[folder_id].name)
+            folder_el = ET.SubElement(body, "outline", text=folder_map[folder_id_2].name)
             for sub, feed in items:
                 _make_outline(folder_el, sub, feed)
 

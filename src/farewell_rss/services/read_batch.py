@@ -77,7 +77,7 @@ class ReadBatchService:
         match label.type:
             case LabelType.FOLDER:
                 subscriptions = await self._subscription_service.list_by_folder(label)
-                results: list[ReadState] = []
+                results = []
                 for sub in subscriptions:
                     results += await self.insert_by_subscription(
                         sub, older_than_id, timestamp
@@ -96,7 +96,7 @@ class ReadBatchService:
                     star_states = [
                         ss for ss in star_states if ss.entry_id <= older_than_id
                     ]
-                results: list[ReadState] = []
+                results = []
                 for ss in star_states:
                     entry = await self._entry_service.get(ss.entry_id)
                     if not entry:

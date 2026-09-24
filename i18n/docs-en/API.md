@@ -149,8 +149,8 @@ Soft-deleted users are not included.
 | --------- | ------------------------------------ |
 | `n`     | Number of entries to return (default 20) |
 | `r`     | Sort order: `n`/`d` descending, `o` ascending (by entry effective timestamp + id) |
-| `ot`    | Start timestamp (seconds)            |
-| `nt`    | End timestamp (seconds)              |
+| `ot`    | Start timestamp (seconds), inclusive lower bound |
+| `nt`    | End timestamp (seconds), inclusive upper bound (covers the whole `nt`-th second) |
 | `c`     | Pagination continuation (32-digit hex: 16 digits timestamp + 16 digits id) |
 | `xt`    | Exclude tag                          |
 | `it`    | Include only tag                     |
@@ -160,23 +160,39 @@ Soft-deleted users are not included.
 
 Supported stream paths:
 
-| path                                     | Description                |
-| ---------------------------------------- | -------------------------- |
-| `user/-/state/com.google/reading-list` | All entries                |
-| `user/-/state/com.google/starred`      | Starred                    |
-| `user/-/state/com.google/read`         | Read                       |
-| `user/-/state/com.google/unread`       | Unread                     |
-| `user/-/state/farewell-rss/starred-uncategorized` | Uncategorized starred (extension) |
-| `user/-/state/farewell-rss/history`    | Reading history (extension) |
-| `feed/{id}`                            | A single feed              |
-| `user/-/label/{name}`                  | Folder/tag (FOLDER takes precedence) |
-| `user/-/search/{query}`                | FTS5 full-text search (extension) |
+| path                                     | Description                | Scope                    |
+| ---------------------------------------- | -------------------------- | ------------------------ |
+| `user/-/state/com.google/reading-list` | All entries                | Current subscriptions only |
+| `user/-/state/com.google/starred`      | Starred                    | All data, including unsubscribed feeds |
+| `user/-/state/com.google/read`         | Read                       | All data, including unsubscribed feeds |
+| `user/-/state/com.google/unread`       | Unread                     | Current subscriptions only |
+| `user/-/state/farewell-rss/starred-uncategorized` | Uncategorized starred (extension) | All data, including unsubscribed feeds |
+| `user/-/state/farewell-rss/history`    | Reading history (extension) | All data, including unsubscribed feeds |
+| `feed/{id}`                            | A single feed              | Current subscriptions only |
+| `user/-/label/{name}`                  | Folder/tag (FOLDER takes precedence) | folder: current subscriptions only; tag: all data, including unsubscribed feeds |
+| `user/-/search/{query}`                | FTS5 full-text search (extension) | All entries in the database (not limited by subscriptions) |
+
+> **What "Scope" means, and the two pairs that are no longer complementary**: Unsubscribing (`ac=unsubscribe` on `subscription/edit`) only deletes the subscription and drops read states that were "marked as read but never opened" (`ReadState.timestamp IS NULL`). **Genuinely read history (`ReadState` with a timestamp) and starred entries (`StarState`) are kept**, and the corresponding entries are also kept when orphaned feeds are pruned. So the table above splits into two groups:
+>
+> - **Computed from current subscriptions**: `reading-list`, `unread`, `feed/{id}`, and the folder form of `user/-/label/{name}`.
+> - **Computed from all of the user's data (including unsubscribed feeds)**: `read`, `starred`, `starred-uncategorized`, `history`, and the tag form of `user/-/label/{name}`.
+>
+> As a result, two pairs are **no longer complementary** — clients must not use them for reconciliation:
+>
+> | Looks like it should be complementary | Reality |
+> | --- | --- |
+> | `read` + `unread` | Entries read before unsubscribing appear only in `read`; they are in neither `unread` nor `reading-list` (so `read + unread ≠ all entries`) |
+> | `starred` + ("unstarred", i.e. `xt=starred` on `reading-list`) | Entries starred before unsubscribing appear only in `starred`; they do not show up in the reading list's "unstarred" view |
+>
+> In other words: **read/starred is a ledger of "what I have read / starred" and survives unsubscribing, while the reading list and unread streams are a view of "what is currently in my subscriptions".**
 
 > **Read vs history**: `user/-/state/com.google/read` returns every entry that has a read state, including those marked by bulk operations (`mark-all-as-read`); `user/-/state/farewell-rss/history` returns only entries that were **actually read**, i.e. their read state carries a timestamp. Both use the same sorting and pagination logic.
 
 > **About the search stream**: `user/-/search/{query}` uses SQLite FTS5 full-text search, supporting boolean expressions (`python OR go`), phrases (`"hello world"`), and column qualifiers (`title:python`). Search results are sorted by relevance (BM25); the `r` parameter is ignored. Pagination is controlled by `n` (limit) and `c` (continuation = offset in hex), compatible with regular streams.
 
 > **About sorting and pagination**: Entries are sorted by "effective timestamp" (whichever of `published > updated > fetched` applies, in seconds) + auto-increment id; `o` is ascending by time (oldest first), `n`/`d` is descending (newest first). The continuation is a 32-digit hex value whose first 16 digits are the sort timestamp and last 16 digits are the entry id, serving as a compound pagination anchor — when multiple entries share the same second, they are split precisely by id, with no duplicates or omissions. Except for the search stream (see above).
+>
+> **About the time range**: `ot`/`nt` are also compared at second granularity and both are inclusive (`effective timestamp >= ot` and `<= nt`); note that `nt` covers the **entire `nt`-th second**. Microseconds take no part in sorting or pagination — they only appear in the item's `crawlTimeMsec` / `timestampUsec` display fields.
 >
 > **Differences from Google Reader and FreshRSS**: The continuation uses hex format (the Google Reader standard), while FreshRSS uses decimal; FarewellRSS adopts hex and additionally carries a "timestamp + id" compound anchor. FarewellRSS adds the search stream to support full-text search.
 
@@ -235,6 +251,8 @@ Returns `{"subscriptions": [...]}`. Each subscription includes `id`, `title`, `c
 - `subscribe`: the feed part of `s` is a URL
 - `unsubscribe` / `edit`: the feed part of `s` is a numeric ID
 - When the tag in `a` does not exist, it is automatically created as type FOLDER
+
+> **What `unsubscribe` deletes and what it keeps**: it only deletes the subscription, and drops read states for that feed that were "marked as read but never opened" (`ReadState.timestamp IS NULL`). **Genuinely read history (`ReadState` with a timestamp) and starred entries (`StarState`) are kept**, and the corresponding entries are kept when orphaned feeds are pruned. So after unsubscribing, that feed's read/starred entries **still appear in the `read`, `starred`, and `history` streams**, but no longer in `reading-list` or `unread` — see "Scope" in the Stream section for details.
 
 ### subscription/quickadd
 
@@ -360,7 +378,7 @@ Returns four sections:
 
 Supported `s` values: `feed/{id}`, `user/-/label/{name}`, `reading-list`, `starred`.
 
-The read state is implemented by inserting a `ReadState` record whose timestamp is `None` (batch operations do not enter the reading history). Existing ReadStates are not overwritten.
+The read state is implemented by inserting a `ReadState` record whose timestamp is `None` (batch operations do not enter the reading history). Existing ReadStates are not overwritten; these states are dropped when unsubscribing from that feed (genuine reading history is kept). See "Scope" in the Stream section.
 
 ### token
 

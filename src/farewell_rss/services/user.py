@@ -2,11 +2,9 @@ import hashlib
 import hmac
 import logging
 import os
-from datetime import datetime
 
-from ..db.models import Entry, User
+from ..db.models import User
 from ..db.repositories.user import UserRepository
-from .__init__ import Filtering
 from ._password import hash_password, verify_password
 from .exceptions import (
     InvalidInviteCodeError,
@@ -196,24 +194,6 @@ class UserService:
             raise LastAdminDeletionError.from_username(user.username)
         _logger.info("用户 %d 将用户 %d 标记为已删除", operator.id, user.id)
         await self._repository.mark_as_deleted(user)
-
-    async def list_entries(
-        self,
-        user: User,
-        start: datetime | None = None,
-        end: datetime | None = None,
-        include: Filtering | None = None,
-        exclude: Filtering | None = None,
-    ) -> list[Entry]:
-        """列出用户所有订阅的文章，支持过滤"""
-        subscriptions = await self._subscription_service.list_by_user(user)
-        entries: list[Entry] = []
-        for subscription in subscriptions:
-            subscription_entries = await self._subscription_service.list_entries(
-                subscription, start, end, include, exclude
-            )
-            entries += subscription_entries
-        return entries
 
     def generate_auth(self, user: User) -> str:
         """为用户生成 Google Reader API 的 Auth/SID token"""

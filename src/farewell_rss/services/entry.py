@@ -1,8 +1,9 @@
 import logging
 from datetime import datetime
 
-from ..db.models import Entry, Feed, User
+from ..db.models import Entry, Feed
 from ..db.repositories.entry import EntryRepository
+from ..enums import Filtering, SortOrder
 from .read_state import ReadStateService
 from .star_state import StarStateService
 
@@ -30,9 +31,94 @@ class EntryService:
         return await self._repository.get_by_feed_and_guid(feed.id, guid)
 
     async def list_by_feed(
-        self, feed: Feed, start: datetime | None = None, end: datetime | None = None
+        self,
+        feed: Feed,
+        user_id: int | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        include: Filtering | None = None,
+        exclude: Filtering | None = None,
+        sorting: SortOrder = SortOrder.DESCENDING,
+        cursor: tuple[int, int] | None = None,
+        limit: int | None = None,
     ) -> list[Entry]:
-        return await self._repository.list_by_feed(feed.id, start, end)
+        return await self._repository.list_by_feed(
+            feed_id=feed.id,
+            user_id=user_id,
+            start=start,
+            end=end,
+            include=include,
+            exclude=exclude,
+            sorting=sorting,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def list_reading_list(
+        self,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        include: Filtering | None = None,
+        exclude: Filtering | None = None,
+        sorting: SortOrder = SortOrder.DESCENDING,
+        cursor: tuple[int, int] | None = None,
+        limit: int | None = None,
+        folder_id: int | None = None,
+    ) -> list[Entry]:
+        return await self._repository.list_reading_list(
+            user_id=user_id,
+            start=start,
+            end=end,
+            include=include,
+            exclude=exclude,
+            sorting=sorting,
+            cursor=cursor,
+            limit=limit,
+            folder_id=folder_id,
+        )
+
+    async def list_starred(
+        self,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        include: Filtering | None = None,
+        exclude: Filtering | None = None,
+        sorting: SortOrder = SortOrder.DESCENDING,
+        cursor: tuple[int, int] | None = None,
+        limit: int | None = None,
+        tag_id: int | None = None,
+        uncategorized: bool = False,
+    ) -> list[Entry]:
+        return await self._repository.list_starred(
+            user_id,
+            start,
+            end,
+            include,
+            exclude,
+            sorting,
+            cursor,
+            limit,
+            tag_id,
+            uncategorized,
+        )
+
+    async def list_read(
+        self,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        include: Filtering | None = None,
+        exclude: Filtering | None = None,
+        sorting: SortOrder = SortOrder.DESCENDING,
+        cursor: tuple[int, int] | None = None,
+        limit: int | None = None,
+        history: bool = False,
+    ) -> list[Entry]:
+        return await self._repository.list_read(
+            user_id, start, end, include, exclude, sorting, cursor, limit, history
+        )
 
     async def prune_by_feed(self, feed: Feed) -> list[Entry]:
         result = []
@@ -54,19 +140,6 @@ class EntryService:
         )
         await self._repository.delete_batch(to_be_deleted)
         return result
-
-    async def list_by_read_history(self, user: User) -> list[Entry]:
-        """列出用户真正读过的条目（阅读历史）。
-
-        与「已读」的区别：批量标已读会写入 timestamp=None 的 ReadState，
-        那类条目不算读过，也不会出现在这里（见 ReadState.timestamp 的注释）。
-        """
-        read_states = await self._read_state_service.list_history(user)
-        if not read_states:
-            return []
-        entry_ids = [read_state.entry_id for read_state in read_states]
-        # 条目可能已被清理（prune），get_batch 只会返回还存在的
-        return list((await self._repository.get_batch(entry_ids)).values())
 
     async def entry_count(self, feed: Feed) -> int:
         return await self._repository.entry_count(feed.id)

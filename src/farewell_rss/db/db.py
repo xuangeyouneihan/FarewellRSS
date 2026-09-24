@@ -3,6 +3,7 @@ import os
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.schema import CreateIndex, DropIndex
 
 _logger = logging.getLogger(__name__)
 
@@ -37,14 +38,38 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
         # create_all 只建「不存在的表」，对**已存在的表整张跳过**——所以老库拿不到
-        # 后来新增的索引。这里按名字把模型里声明的索引补建一遍（checkfirst 保证幂等），
-        # 于是索引的唯一声明处仍然只有模型，不必在别处重复写一遍 DDL。
-        def _create_missing_indexes(sync_conn) -> None:
+        # 后来新增的索引。这里把模型里声明的索引对齐一遍（幂等），于是索引的唯一
+        # 声明处仍然只有模型，不必在别处重复写一遍 DDL。
+        #
+        # 用 IF NOT EXISTS 而不是 checkfirst：SQLAlchemy **不支持反射表达式索引**
+        # （entries 上的 unixepoch(coalesce(published, updated, fetched)) 那两个），
+        # checkfirst 会把已存在的表达式索引误判为「不存在」，于是重复执行裸 CREATE INDEX
+        # 而报错。
+        #
+        # 但 IF NOT EXISTS 只看名字，**改了索引表达式它不会更新已存在的索引**——老库会
+        # 继续用旧表达式，ORDER BY 用不上索引、静默退化成临时 B 树排序。所以这里对一句
+        # DDL：对不上就先 DROP 再建。sqlite_master 里存的就是当初执行的原文，与模型这边
+        # 编译出来的 DDL 同源，归一化（去 IF NOT EXISTS、压空白）后可以直接比字符串。
+        def _normalize(sql: str) -> str:
+            return " ".join(sql.replace("IF NOT EXISTS ", "").split())
+
+        def _reconcile_indexes(sync_conn) -> None:
+            existing = {
+                row[0]: _normalize(row[1]) if row[1] else None
+                for row in sync_conn.execute(
+                    text("SELECT name, sql FROM sqlite_master WHERE type = 'index'")
+                )
+            }
             for table in Base.metadata.sorted_tables:
                 for index in table.indexes:
-                    index.create(sync_conn, checkfirst=True)
+                    if existing.get(index.name) == _normalize(str(CreateIndex(index))):
+                        continue
+                    if index.name in existing:
+                        _logger.warning("索引 %s 定义已变化，重建", index.name)
+                        sync_conn.execute(DropIndex(index))
+                    sync_conn.execute(CreateIndex(index, if_not_exists=True))
 
-        await conn.run_sync(_create_missing_indexes)
+        await conn.run_sync(_reconcile_indexes)
 
         await conn.execute(
             text("""
