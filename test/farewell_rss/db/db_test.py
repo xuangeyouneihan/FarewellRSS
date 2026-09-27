@@ -164,7 +164,11 @@ async def test_hot_queries_use_index_not_full_scan(initialized_engine):
 
 # 分页查询：(SQL, 期望命中的索引名)
 PAGINATION_QUERIES = {
-    "全局流（无 feed_id 过滤的形态）": (
+    # 注意这**不是**端点形态：真实全局流是 entries JOIN subscriptions，见下面
+    # test_reading_list_stream_merges_via_feed_index。这条只负责证明
+    # 「排序键表达式和 ix_entries_page 的索引表达式逐字一致」——这件事在 join 形态的
+    # 计划里看不出来（join 形态无论如何都有 TEMP B-TREE），所以必须单独留一条。
+    "索引表达式与排序键一致（无过滤无 join）": (
         "SELECT * FROM entries ORDER BY"
         " unixepoch(coalesce(published, updated, fetched)) DESC, id DESC LIMIT 21",
         "ix_entries_page",
@@ -190,14 +194,12 @@ async def test_pagination_queries_avoid_temp_sort(initialized_engine):
     有索引却仍要临时排序，等于白建——而且临时排序的代价随匹配行数增长，
     在浅分页的小数据集上看不出来，库一大就暴露。
 
-    注意全局流是 SCAN ... USING INDEX：这不是全表扫，而是按索引顺序扫描、
-    凑满 LIMIT 后提前终止；没有过滤条件时这正是最优形态。这也是它不能
+    注意上面那条无过滤的查询是 SCAN ... USING INDEX：这不是全表扫，而是按索引
+    顺序扫描、凑满 LIMIT 后提前终止；没有过滤条件时这正是最优形态。这也是它不能
     和上面的 HOT_QUERIES 共用断言（那里禁止 SCAN）的原因。
 
-    但全局流这条 SQL 是**简化形态**（没有 join subscriptions）。真实端点是
-    entries JOIN subscriptions，SQLite 会从 subscriptions 驱动、按 feed_id 逐源取
-    条目，多源归并天然要排序，那个形态用不上 ix_entries_page。所以这条断言
-    保护的是「索引表达式和排序键对得上」，不是「真实端点不会临时排序」。
+    真实端点形态（entries JOIN subscriptions）单独由
+    test_reading_list_stream_merges_via_feed_index 覆盖。
 
     另一个坑：断言必须在 schema 定稿之后做。实测在同一连接里改过 schema
     （比如 DROP INDEX）之后紧接着 EXPLAIN QUERY PLAN，可能拿到**陈旧的计划**
@@ -212,3 +214,53 @@ async def test_pagination_queries_avoid_temp_sort(initialized_engine):
             assert not any("TEMP B-TREE" in p for p in plan), (
                 f"{label} 仍在做临时排序（索引白建）: {plan}"
             )
+
+
+# 真实端点形态：api/stream.py 的全局流 → EntryRepository.list_reading_list
+# （entries JOIN subscriptions、按 user_id 过滤订阅、按同一个表达式排序、LIMIT n+1）
+READING_LIST_SQL = (
+    "SELECT entries.* FROM entries"
+    " JOIN subscriptions ON entries.feed_id = subscriptions.feed_id"
+    " WHERE subscriptions.user_id = 1"
+    " ORDER BY unixepoch(coalesce(entries.published, entries.updated, entries.fetched))"
+    " DESC, entries.id DESC LIMIT 21"
+)
+
+
+async def test_reading_list_stream_merges_via_feed_index(initialized_engine):
+    """全局流（真实端点形态）从 subscriptions 驱动，entries 逐源走 ix_entries_feed_id
+
+    这个形态以前**没有被覆盖**：老的断言用的是去掉 join 的简化 SQL，只证明了
+    「索引表达式和排序键逐字一致」，没证明端点自己的计划长什么样——而两者完全
+    不同（简化形态 SCAN ix_entries_page 且无临时树；真实形态逐源取条目、有临时树）。
+
+    期望的计划：
+        SEARCH subscriptions USING COVERING INDEX sqlite_autoindex_subscriptions_1 (user_id=?)
+        SEARCH entries USING INDEX ix_entries_feed_id (feed_id=?)
+        USE TEMP B-TREE FOR ORDER BY
+
+    最后那个 TEMP B-TREE 是**预期成本，不是退化**，别去「修」它：
+    - 它是**有界 top-N 排序器**（bytecode 里 OpenEphemeral 的容量就是 LIMIT），
+      只装 n 行，不是把命中条目全排一遍；
+    - 外层逐源循环，内层在 ix_entries_feed_id（feed_id 开头、第三四列正是排序用的
+      表达式和 id）上 SeekLE 到该源最新一条再 Prev 往回走，所以每个源内部天然有序；
+    - 排序器填满后，一旦某行比排序器尾部还差，SQLite 直接跳到下一个源
+      （bytecode：Last + IdxLE → Next subscriptions），该源剩下的条目一条都不读。
+
+    代价因此是 O(订阅数 × 每源命中深度 + n log n)，不是 O(命中条目数)：10 万条
+    entries、250 个订阅、命中 5 万条（50% 密度）时，LIMIT 20 实测 0.12ms。
+
+    反过来，强制走 ix_entries_page 有序扫（feed_id IN (SELECT ...) INDEXED BY
+    ix_entries_page）在同一个库上实测 292ms（订阅 5 源）/ 62ms（25 源）——因为
+    ix_entries_page 里没有 feed_id，每扫一行都要回表取 feed_id 再判成员，代价跟
+    entries 总量挂钩，而不是跟用户的订阅规模挂钩。下面这条「没有 SCAN」断言就是
+    用来挡掉那种改写的。
+    """
+    async with initialized_engine.connect() as conn:
+        plan = await _plan(conn, READING_LIST_SQL)
+        assert any("ix_entries_feed_id" in p for p in plan), (
+            f"全局流没用上 ix_entries_feed_id: {plan}"
+        )
+        assert not any(p.startswith("SCAN") for p in plan), (
+            f"全局流出现了全表扫（多半是改成了 feed_id IN (...) + ix_entries_page）: {plan}"
+        )
