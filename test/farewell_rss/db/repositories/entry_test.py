@@ -2,11 +2,12 @@ from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from farewell_rss.db.models import Base, Entry, Feed
+from farewell_rss.db.models import Base, Enclosure, Entry, Feed
+from farewell_rss.db.repositories import _chunking
 from farewell_rss.db.repositories.entry import EntryRepository
 from farewell_rss.feed_fetcher.feed_fetcher import FetchedEntry
 
@@ -108,7 +109,7 @@ async def test_get(session, feed):
     assert result == entry1
 
 
-async def test_get_batch(session, feed):
+async def test_get_batch(session, feed, monkeypatch):
     repo = EntryRepository(session)
 
     entry1 = Entry(
@@ -132,6 +133,11 @@ async def test_get_batch(session, feed):
     assert result == {entry1.id: entry1, entry2.id: entry2}
 
     assert await repo.get_batch([]) == {}  # 空列表
+
+    # 批次小到 1 时每条都是独立的一批，结果必须和上面一模一样
+    # （分批最容易出的错是后一批把前一批的结果覆盖掉）
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    assert await repo.get_batch([entry1.id, entry2.id]) == result
 
 
 async def test_get_by_feed_and_guid(session, feed):
@@ -301,14 +307,73 @@ async def test_delete_batch(session, feed):
         fetched=datetime(1970, 1, 1, tzinfo=UTC),
     )
     session.add_all([entry1, entry2, entry3])
+    await session.flush()
+    for entry in (entry1, entry2, entry3):
+        session.add(
+            Enclosure(entry_id=entry.id, href=f"https://example.com/{entry.id}.mp3")
+        )
     await session.commit()
 
     # 删除条目
-    await repo.delete_batch([entry1, entry2])
+    await repo.delete_batch([entry1.id, entry2.id])
 
     # 验证删除结果
     result = await repo.list_by_feed(feed.id)
     assert set(result) == {entry3}
+
+    # 附件跟着走，没被删的那条不受影响
+    assert await session.scalar(select(func.count()).select_from(Enclosure)) == 1
+    assert await session.scalar(select(Enclosure.entry_id)) == entry3.id
+
+
+async def test_delete_batch_empty(session):
+    """没有条目要删是空操作（prune 的常见路径），不能报错"""
+    await EntryRepository(session).delete_batch([])
+
+
+async def test_delete_batch_chunks(session, feed, monkeypatch):
+    """待删数量超过一批时要逐批删完，而不是只删第一批
+
+    批次大小是常量，这里改成 2 就能花 5 条数据跑到「一批放不下」的分支。
+    顺带把语句数也钉住：每批固定 2 条 DELETE（附件 + 条目），不是每条 2 条——
+    逐条 delete + flush 的写法会退化成 2N 条，那正是这次要避免的东西。
+    """
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 2)
+
+    # 监听要挂在本测试对 session 下手之前，否则可能漏掉已建连接上的事件
+    executed: list[str] = []
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def _record(conn, cursor, statement, params, context, executemany):
+        executed.append(statement)
+
+    repo = EntryRepository(session)
+
+    entries = [
+        Entry(
+            feed_id=feed.id,
+            guid=f"chunk-{i}",
+            fetched=datetime(1970, 1, 1, tzinfo=UTC),
+        )
+        for i in range(5)
+    ]
+    session.add_all(entries)
+    await session.flush()
+    for entry in entries:
+        session.add(
+            Enclosure(entry_id=entry.id, href=f"https://example.com/{entry.id}.mp3")
+        )
+    await session.commit()
+
+    await repo.delete_batch([entry.id for entry in entries])
+
+    assert await repo.list_by_feed(feed.id) == []
+    assert await session.scalar(select(func.count()).select_from(Enclosure)) == 0
+
+    deletes = [s for s in executed if s.lstrip().upper().startswith("DELETE")]
+    assert len(deletes) == 2 * 3, (
+        f"5 条按每批 2 条应该分 3 批、每批 2 条 DELETE，实际 {len(deletes)} 条"
+    )
 
 
 async def test_entry_count(session, feed_factory):

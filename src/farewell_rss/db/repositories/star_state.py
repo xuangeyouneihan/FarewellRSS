@@ -5,6 +5,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import StarState
+from ._chunking import chunked
 from .entry import EntryRepository
 
 _logger = logging.getLogger(__name__)
@@ -25,13 +26,15 @@ class StarStateRepository:
             _logger.debug("批量获取收藏状态，ids 为空")
             return {}
         _logger.debug("批量获取收藏状态，用户: %d, %d 条", user_id, len(entry_ids))
-        result = await self._session.execute(
-            select(StarState).where(
-                StarState.user_id == user_id, StarState.entry_id.in_(entry_ids)
+        star_states: dict[int, StarState] = {}
+        for batch in chunked(entry_ids):
+            result = await self._session.execute(
+                select(StarState).where(
+                    StarState.user_id == user_id, StarState.entry_id.in_(batch)
+                )
             )
-        )
-        star_states = result.scalars().all()
-        return {star_state.entry_id: star_state for star_state in star_states}
+            star_states.update((ss.entry_id, ss) for ss in result.scalars().all())
+        return star_states
 
     async def list_by_user(self, user_id: int) -> list[StarState]:
         _logger.debug("列出用户 %d 的所有收藏", user_id)
@@ -46,12 +49,15 @@ class StarStateRepository:
         entry_ids = [entry.id for entry in entries]
         if not entry_ids:
             return []
-        result = await self._session.execute(
-            select(StarState).where(
-                StarState.user_id == user_id, StarState.entry_id.in_(entry_ids)
+        result: list[StarState] = []
+        for batch in chunked(entry_ids):
+            rows = await self._session.execute(
+                select(StarState).where(
+                    StarState.user_id == user_id, StarState.entry_id.in_(batch)
+                )
             )
-        )
-        return list(result.scalars().all())
+            result.extend(rows.scalars().all())
+        return result
 
     async def list_by_tag(self, tag_id: int) -> list[StarState]:
         _logger.debug("列出标签 %d 的收藏", tag_id)
@@ -130,9 +136,12 @@ class StarStateRepository:
             _logger.debug("批量查询收藏计数，ids 为空")
             return {}
         _logger.debug("批量查询收藏计数，%d 条", len(entry_ids))
-        result = await self._session.execute(
-            select(StarState.entry_id, func.count())
-            .where(StarState.entry_id.in_(entry_ids))
-            .group_by(StarState.entry_id)
-        )
-        return {row[0]: row[1] for row in result.all()}
+        counts: dict[int, int] = {}
+        for batch in chunked(entry_ids):
+            result = await self._session.execute(
+                select(StarState.entry_id, func.count())
+                .where(StarState.entry_id.in_(batch))
+                .group_by(StarState.entry_id)
+            )
+            counts.update((row[0], row[1]) for row in result.all())
+        return counts

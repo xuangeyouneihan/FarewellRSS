@@ -4,6 +4,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Label, LabelType
+from ._chunking import chunked
 
 _logger = logging.getLogger(__name__)
 
@@ -21,10 +22,14 @@ class LabelRepository:
     async def get_batch(self, ids: list[int]) -> dict[int, Label]:
         if not ids:
             return {}
-        result = await self._session.execute(select(Label).where(Label.id.in_(ids)))
-        labels = result.scalars().all()
+        labels: dict[int, Label] = {}
+        for batch in chunked(ids):
+            result = await self._session.execute(
+                select(Label).where(Label.id.in_(batch))
+            )
+            labels.update((label.id, label) for label in result.scalars().all())
         _logger.debug("批量获取 %d 个标签，获取到 %d 个", len(ids), len(labels))
-        return {label.id: label for label in labels}
+        return labels
 
     async def get_by_user_name_type(
         self, user_id: int, name: str, type_: LabelType

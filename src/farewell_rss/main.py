@@ -154,7 +154,7 @@ if _FRONTEND_DIST:
                 raise HTTPException(status_code=404, detail="Not Found")
             # 静态文件（favicon 等在 dist 根目录）存在则直接返回
             if full_path:
-                candidate = os.path.join(_FRONTEND_DIST, full_path)  # noqa: arg-type
+                candidate = os.path.join(_FRONTEND_DIST, full_path)
                 if os.path.isfile(candidate):
                     return FileResponse(candidate)
             return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))

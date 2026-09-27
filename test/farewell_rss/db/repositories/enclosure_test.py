@@ -158,3 +158,30 @@ async def test_delete_by_entry(session, entry_factory):
     # 对照 entry 的附件毫发无伤
     result_ctrl = await repo.list_by_entry(entry2.id)
     assert set(result_ctrl) == {enc_ctrl}
+
+
+async def test_delete_by_entries(session, entry_factory):
+    repo = EnclosureRepository(session)
+
+    entry1 = await entry_factory()
+    entry2 = await entry_factory()
+    entry3 = await entry_factory()
+
+    enc1 = Enclosure(entry_id=entry1.id, href="https://example.com/f1.mp3")
+    enc3 = Enclosure(entry_id=entry3.id, href="https://example.com/f3.mp3")
+    enc_ctrl = Enclosure(entry_id=entry2.id, href="https://example.com/ctrl.mp3")
+    session.add_all([enc1, enc3, enc_ctrl])
+    await session.commit()
+
+    # 空列表是空操作
+    await repo.delete_by_entries([])
+    assert len(await repo.list_by_entry(entry1.id)) == 1
+
+    # 一次删多个条目的附件
+    await repo.delete_by_entries([entry1.id, entry3.id])
+    assert await repo.list_by_entry(entry1.id) == []
+    assert await repo.list_by_entry(entry3.id) == []
+
+    # 对照 entry 的附件毫发无伤
+    result_ctrl = await repo.list_by_entry(entry2.id)
+    assert set(result_ctrl) == {enc_ctrl}

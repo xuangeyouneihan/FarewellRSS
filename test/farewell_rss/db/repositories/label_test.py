@@ -2,6 +2,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from farewell_rss.db.models import Base, Label, LabelType, User
+from farewell_rss.db.repositories import _chunking
 from farewell_rss.db.repositories.label import LabelRepository
 
 
@@ -36,7 +37,7 @@ async def test_get(session, user):
     assert result == label
 
 
-async def test_get_batch(session, user):
+async def test_get_batch(session, user, monkeypatch):
     repo = LabelRepository(session)
 
     l1 = Label(user_id=user.id, name="A", type=LabelType.FOLDER)
@@ -48,6 +49,10 @@ async def test_get_batch(session, user):
     assert result == {l1.id: l1, l2.id: l2}
 
     assert await repo.get_batch([]) == {}
+
+    # 批次小到 1 时每条都是独立的一批，结果必须和上面一模一样
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    assert await repo.get_batch([l1.id, l2.id]) == result
 
 
 async def test_get_by_user_name_type(session, user):

@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from farewell_rss.db.models import Base, Entry, Feed, StarState, User
+from farewell_rss.db.repositories import _chunking
 from farewell_rss.db.repositories.star_state import StarStateRepository
 
 
@@ -73,7 +74,7 @@ async def test_get(session, user, entry):
     assert result == ss
 
 
-async def test_get_batch(session, user, entry):
+async def test_get_batch(session, user, entry, monkeypatch):
     repo = StarStateRepository(session)
 
     entry2 = Entry(
@@ -98,6 +99,41 @@ async def test_get_batch(session, user, entry):
     assert result == {entry.id: ss1, entry2.id: ss2}
 
     assert await repo.get_batch(user.id, []) == {}
+
+    # 批次小到 1 时每条都是独立的一批，结果必须和上面一模一样
+    # （分批最容易出的错是后一批把前一批的结果覆盖掉）
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    assert await repo.get_batch(user.id, [entry.id, entry2.id]) == result
+
+
+async def test_star_count_batch(session, user, entry, monkeypatch):
+    """批量收藏计数：分批后要合并而不是覆盖"""
+    repo = StarStateRepository(session)
+
+    entry2 = Entry(
+        feed_id=entry.feed_id,
+        guid="guid-2",
+        title="文章 2",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    session.add(entry2)
+    await session.commit()
+
+    session.add(
+        StarState(
+            user_id=user.id,
+            entry_id=entry.id,
+            timestamp=datetime(1970, 1, 1, tzinfo=UTC),
+        )
+    )
+    await session.commit()
+
+    result = await repo.star_count_batch([entry.id, entry2.id])
+    assert result == {entry.id: 1}
+
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    assert await repo.star_count_batch([entry.id, entry2.id]) == result
+    assert await repo.star_count_batch([]) == {}
 
 
 async def test_list_by_user(session, user, entry):
@@ -149,7 +185,7 @@ async def test_delete(session, user, entry):
     assert await repo.get(user.id, entry.id) is None
 
 
-async def test_list_by_subscription(session, user, feed):
+async def test_list_by_subscription(session, user, feed, monkeypatch):
     """按订阅列出收藏，多用户多 feed 隔离"""
     repo = StarStateRepository(session)
 
@@ -200,3 +236,7 @@ async def test_list_by_subscription(session, user, feed):
 
     result = await repo.list_by_subscription(user.id, feed.id)
     assert set(result) == {ss1, ss2}
+
+    # 分批后要合并，不是只留最后一批
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    assert set(await repo.list_by_subscription(user.id, feed.id)) == {ss1, ss2}

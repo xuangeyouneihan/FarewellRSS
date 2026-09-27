@@ -4,6 +4,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Subscription
+from ._chunking import chunked
 
 _logger = logging.getLogger(__name__)
 
@@ -23,13 +24,15 @@ class SubscriptionRepository:
             _logger.debug("批量获取订阅，ids 为空")
             return {}
         _logger.debug("批量获取订阅，用户: %d, %d 个", user_id, len(feed_ids))
-        result = await self._session.execute(
-            select(Subscription).where(
-                Subscription.user_id == user_id, Subscription.feed_id.in_(feed_ids)
+        subscriptions: dict[int, Subscription] = {}
+        for batch in chunked(feed_ids):
+            result = await self._session.execute(
+                select(Subscription).where(
+                    Subscription.user_id == user_id, Subscription.feed_id.in_(batch)
+                )
             )
-        )
-        subscriptions = result.scalars().all()
-        return {sub.feed_id: sub for sub in subscriptions}
+            subscriptions.update((sub.feed_id, sub) for sub in result.scalars().all())
+        return subscriptions
 
     async def list_by_folder(self, folder_id: int | None) -> list[Subscription]:
         if folder_id is None:

@@ -1241,8 +1241,10 @@ async def test_unread_count_and_mark_all_as_read_scopes(client: AsyncClient):
 async def test_change_password_and_delete_account_permissions(client: AsyncClient):
     """本人改密/删号、非管理员越权和管理员删除用户"""
     admin = await _register(client, "account-admin")
-    owner = await _register(client, "account-owner")
-    other = await _register(client, "account-other")
+    # 这两个只为了把账号建出来：后面的请求体里用的是用户名字符串，用不到返回的
+    # Authorization 头，所以不接返回值
+    await _register(client, "account-owner")
+    await _register(client, "account-other")
 
     r = await client.post(
         "/api/accounts/ChangePassword",

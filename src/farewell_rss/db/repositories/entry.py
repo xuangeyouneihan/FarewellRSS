@@ -1,12 +1,13 @@
 import logging
 from datetime import datetime
 
-from sqlalchemy import Select, and_, exists, func, or_, select, text
+from sqlalchemy import Select, and_, delete, exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...enums import Filtering, SortOrder
 from ...feed_fetcher.feed_fetcher import FetchedEntry
 from ..models import Entry, ReadState, StarState, Subscription
+from ._chunking import chunked
 from .enclosure import EnclosureRepository
 
 _logger = logging.getLogger(__name__)
@@ -126,10 +127,14 @@ class EntryRepository:
         if not ids:
             _logger.debug("批量获取条目，ids 为空")
             return {}
-        result = await self._session.execute(select(Entry).where(Entry.id.in_(ids)))
-        entries = result.scalars().all()
+        entries: dict[int, Entry] = {}
+        for batch in chunked(ids):
+            result = await self._session.execute(
+                select(Entry).where(Entry.id.in_(batch))
+            )
+            entries.update((entry.id, entry) for entry in result.scalars().all())
         _logger.debug("批量获取 %d 条条目，获取到 %d 条", len(ids), len(entries))
-        return {entry.id: entry for entry in entries}
+        return entries
 
     async def get_by_feed_and_guid(self, feed_id: int, guid: str) -> Entry | None:
         _logger.debug("获取条目，feed_id: %d, guid: %s", feed_id, guid)
@@ -441,11 +446,24 @@ class EntryRepository:
 
         return results
 
-    async def delete_batch(self, entries: list[Entry]) -> None:
-        for entry in entries:
-            await self._enclosure_repository.delete_by_entry(entry.id)
-            _logger.debug("删除条目 %d", entry.id)
-            await self._session.delete(entry)
+    async def delete_batch(self, entry_ids: list[int]) -> None:
+        """批量删除条目及其附件。
+
+        附件、条目各一条 SQL，按 `_chunking.MAX_IDS_PER_STATEMENT` 分批（`IN (...)`
+        的参数个数有硬上限，见那个模块），全部在同一个事务里提交——中途失败不会留下
+        「附件删了、条目还在」的半成品。逐条 delete + flush 的写法是 2N 条 SQL、N 次
+        COMMIT（实测 40 条＝80 条 SQL），分批后语句数只跟批次大小有关，跟条目数无关。
+
+        本方法只负责附件，read_states / star_states 不在这里删——那是调用方
+        （services/entry.py::prune_by_feed）的前提：只删既没人收藏也没人读过的条目。
+        """
+        if not entry_ids:
+            _logger.debug("没有条目要删除")
+            return
+        for batch in chunked(entry_ids):
+            await self._enclosure_repository.delete_by_entries(batch, commit=False)
+            await self._session.execute(delete(Entry).where(Entry.id.in_(batch)))
+        _logger.debug("删除条目 %d 条", len(entry_ids))
         await self._session.commit()
 
     async def entry_count(self, feed_id: int) -> int:

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...feed_fetcher.feed_fetcher import FetchedFeed
 from ..models import Feed
+from ._chunking import chunked
 from .entry import EntryRepository
 
 _logger = logging.getLogger(__name__)
@@ -24,10 +25,12 @@ class FeedRepository:
         if not ids:
             return {}
         _logger.debug("批量获取 %d 个订阅源", len(ids))
-        result = await self._session.execute(select(Feed).where(Feed.id.in_(ids)))
-        feeds = result.scalars().all()
+        feeds: dict[int, Feed] = {}
+        for batch in chunked(ids):
+            result = await self._session.execute(select(Feed).where(Feed.id.in_(batch)))
+            feeds.update((feed.id, feed) for feed in result.scalars().all())
         _logger.debug("获取到 %d 个", len(feeds))
-        return {feed.id: feed for feed in feeds}
+        return feeds
 
     async def get_by_href(self, href: str) -> Feed | None:
         _logger.debug("按 href 查找订阅源: %s", href)

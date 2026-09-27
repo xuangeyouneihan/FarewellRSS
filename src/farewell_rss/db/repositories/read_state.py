@@ -5,6 +5,7 @@ from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Entry, ReadState, StarState, Subscription
+from ._chunking import chunked
 from .entry import EntryRepository
 
 _logger = logging.getLogger(__name__)
@@ -25,13 +26,15 @@ class ReadStateRepository:
             _logger.debug("批量获取已读状态，ids 为空")
             return {}
         _logger.debug("批量获取已读状态，用户: %d, %d 条", user_id, len(entry_ids))
-        result = await self._session.execute(
-            select(ReadState).where(
-                ReadState.user_id == user_id, ReadState.entry_id.in_(entry_ids)
+        read_states: dict[int, ReadState] = {}
+        for batch in chunked(entry_ids):
+            result = await self._session.execute(
+                select(ReadState).where(
+                    ReadState.user_id == user_id, ReadState.entry_id.in_(batch)
+                )
             )
-        )
-        read_states = result.scalars().all()
-        return {read_state.entry_id: read_state for read_state in read_states}
+            read_states.update((rs.entry_id, rs) for rs in result.scalars().all())
+        return read_states
 
     async def list_by_user(self, user_id: int) -> list[ReadState]:
         _logger.debug("列出用户 %d 的所有已读状态", user_id)
@@ -46,12 +49,15 @@ class ReadStateRepository:
         entry_ids = [entry.id for entry in entries]
         if not entry_ids:
             return []
-        result = await self._session.execute(
-            select(ReadState).where(
-                ReadState.user_id == user_id, ReadState.entry_id.in_(entry_ids)
+        result: list[ReadState] = []
+        for batch in chunked(entry_ids):
+            rows = await self._session.execute(
+                select(ReadState).where(
+                    ReadState.user_id == user_id, ReadState.entry_id.in_(batch)
+                )
             )
-        )
-        return list(result.scalars().all())
+            result.extend(rows.scalars().all())
+        return result
 
     async def list_history(self, user_id: int) -> list[ReadState]:
         """列出用户的阅读历史：只有 timestamp 非空的才算「真正读过」"""
@@ -138,14 +144,14 @@ class ReadStateRepository:
     async def prune_by_subscription(self, user_id: int, feed_id: int) -> None:
         _logger.debug("清理订阅 %d/%d 的无时间戳已读状态", user_id, feed_id)
         entries = await EntryRepository(self._session).list_by_feed(feed_id)
-        entry_ids = [entry.id for entry in entries]
-        await self._session.execute(
-            delete(ReadState).where(
-                ReadState.user_id == user_id,
-                ReadState.entry_id.in_(entry_ids),
-                ReadState.timestamp.is_(None),
+        for batch in chunked([entry.id for entry in entries]):
+            await self._session.execute(
+                delete(ReadState).where(
+                    ReadState.user_id == user_id,
+                    ReadState.entry_id.in_(batch),
+                    ReadState.timestamp.is_(None),
+                )
             )
-        )
         await self._session.commit()
 
     async def read_count(self, entry_id: int) -> int:
@@ -162,12 +168,15 @@ class ReadStateRepository:
             _logger.debug("批量已读计数，ids 为空")
             return {}
         _logger.debug("批量已读计数，共 %d 条", len(entry_ids))
-        result = await self._session.execute(
-            select(ReadState.entry_id, func.count())
-            .where(ReadState.entry_id.in_(entry_ids), ReadState.timestamp.isnot(None))
-            .group_by(ReadState.entry_id)
-        )
-        return {row[0]: row[1] for row in result.all()}
+        counts: dict[int, int] = {}
+        for batch in chunked(entry_ids):
+            result = await self._session.execute(
+                select(ReadState.entry_id, func.count())
+                .where(ReadState.entry_id.in_(batch), ReadState.timestamp.isnot(None))
+                .group_by(ReadState.entry_id)
+            )
+            counts.update((row[0], row[1]) for row in result.all())
+        return counts
 
     async def unread_by_feed(self, user_id: int) -> dict[int, tuple[int, int]]:
         """按订阅源统计未读：{feed_id: (未读数, 最新未读条目的 id)}

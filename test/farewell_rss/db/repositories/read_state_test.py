@@ -15,6 +15,7 @@ from farewell_rss.db.models import (
     Subscription,
     User,
 )
+from farewell_rss.db.repositories import _chunking
 from farewell_rss.db.repositories.read_state import ReadStateRepository
 
 
@@ -81,7 +82,7 @@ async def test_get(session, user, entry):
     assert result == rs
 
 
-async def test_get_batch(session, user, entry):
+async def test_get_batch(session, user, entry, monkeypatch):
     repo = ReadStateRepository(session)
 
     entry2 = Entry(
@@ -102,6 +103,43 @@ async def test_get_batch(session, user, entry):
     assert result == {entry.id: rs1, entry2.id: rs2}
 
     assert await repo.get_batch(user.id, []) == {}
+
+    # 批次小到 1 时每条都是独立的一批，结果必须和上面一模一样
+    # （分批最容易出的错是后一批把前一批的结果覆盖掉）
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    assert await repo.get_batch(user.id, [entry.id, entry2.id]) == result
+
+
+async def test_read_count_batch(session, user, entry, monkeypatch):
+    """批量已读计数只数「真正读过」的（timestamp 非空），且分批后要合并而不是覆盖"""
+    repo = ReadStateRepository(session)
+
+    entry2 = Entry(
+        feed_id=entry.feed_id,
+        guid="guid-2",
+        title="文章 2",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    session.add(entry2)
+    await session.commit()
+
+    session.add_all([
+        ReadState(
+            user_id=user.id,
+            entry_id=entry.id,
+            timestamp=datetime(1970, 1, 1, tzinfo=UTC),
+        ),
+        # 标为已读但没真读过：不算历史，不计数
+        ReadState(user_id=user.id, entry_id=entry2.id),
+    ])
+    await session.commit()
+
+    result = await repo.read_count_batch([entry.id, entry2.id])
+    assert result == {entry.id: 1}
+
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    assert await repo.read_count_batch([entry.id, entry2.id]) == result
+    assert await repo.read_count_batch([]) == {}
 
 
 async def test_list_by_user(session, user, entry):
@@ -161,7 +199,7 @@ async def test_upsert(session, user, entry):
     assert rs2.timestamp == ts2
 
 
-async def test_list_by_subscription(session, user, feed):
+async def test_list_by_subscription(session, user, feed, monkeypatch):
     """按订阅列出已读状态，多用户多 feed 隔离"""
     repo = ReadStateRepository(session)
 
@@ -208,6 +246,10 @@ async def test_list_by_subscription(session, user, feed):
     result = await repo.list_by_subscription(user.id, feed.id)
     assert set(result) == {rs1, rs2}
 
+    # 分批后要合并，不是只留最后一批
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    assert set(await repo.list_by_subscription(user.id, feed.id)) == {rs1, rs2}
+
     # 没有条目的 feed
     feed3 = Feed(
         href="https://example.com/feed3.xml",
@@ -217,6 +259,42 @@ async def test_list_by_subscription(session, user, feed):
     session.add(feed3)
     await session.commit()
     assert await repo.list_by_subscription(user.id, feed3.id) == []
+
+
+async def test_prune_by_subscription(session, user, feed, monkeypatch):
+    """按订阅清理「标为已读但没真读过」的状态：超过一批时每一批都要清到
+
+    批次改成 1（一共 4 条）就是为了让“只清了第一批”这种错法被抓住。
+    """
+    repo = ReadStateRepository(session)
+
+    entries = [
+        Entry(
+            feed_id=feed.id,
+            guid=f"g{i}",
+            title=f"文章 {i}",
+            fetched=datetime(1970, 1, 1, tzinfo=UTC),
+        )
+        for i in range(4)
+    ]
+    session.add_all(entries)
+    await session.commit()
+
+    read_at = datetime(1970, 1, 1, tzinfo=UTC)
+    for i, item in enumerate(entries):
+        # 前两条是「标为已读」、后两条是「真读过」
+        session.add(
+            ReadState(
+                user_id=user.id, entry_id=item.id, timestamp=None if i < 2 else read_at
+            )
+        )
+    await session.commit()
+
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    await repo.prune_by_subscription(user.id, feed.id)
+
+    left = await repo.list_by_subscription(user.id, feed.id)
+    assert {rs.entry_id for rs in left} == {entries[2].id, entries[3].id}
 
 
 async def test_upsert_batch(session, user, entry):

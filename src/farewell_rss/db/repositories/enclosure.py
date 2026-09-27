@@ -88,8 +88,33 @@ class EnclosureRepository:
 
         return result
 
-    async def delete_by_entry(self, entry_id: int) -> None:
+    async def delete_by_entry(self, entry_id: int, commit: bool = True) -> None:
         await self._session.execute(
             delete(Enclosure).where(Enclosure.entry_id == entry_id)
         )
         _logger.debug("删除条目 %d 的所有附件", entry_id)
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()
+
+    async def delete_by_entries(
+        self, entry_ids: list[int], commit: bool = True
+    ) -> None:
+        """删除一批条目的全部附件。
+
+        `IN (...)` 的参数个数有上限，分批的责任在**调用方**（见 entry.py 里
+        MAX_IDS_PER_STATEMENT 的注释），这里不做二次分批。
+        """
+        if not entry_ids:
+            _logger.debug("没有条目要删除附件")
+            return
+        await self._session.execute(
+            delete(Enclosure).where(Enclosure.entry_id.in_(entry_ids))
+        )
+        # 只记条数：可能一次传进来上万个 id，整列打出来是一行几百 KB 的日志
+        _logger.debug("删除 %d 个条目的所有附件", len(entry_ids))
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()

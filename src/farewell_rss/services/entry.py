@@ -138,7 +138,7 @@ class EntryService:
             len(to_be_deleted),
             len(result),
         )
-        await self._repository.delete_batch(to_be_deleted)
+        await self._repository.delete_batch([entry.id for entry in to_be_deleted])
         return result
 
     async def entry_count(self, feed: Feed) -> int:
