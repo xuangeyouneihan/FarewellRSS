@@ -6,7 +6,15 @@ from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from farewell_rss.db.models import Base, Enclosure, Entry, Feed
+from farewell_rss.db.models import (
+    Base,
+    Enclosure,
+    Entry,
+    Feed,
+    ReadState,
+    StarState,
+    User,
+)
 from farewell_rss.db.repositories import _chunking
 from farewell_rss.db.repositories.entry import EntryRepository
 from farewell_rss.feed_fetcher.feed_fetcher import FetchedEntry
@@ -374,6 +382,72 @@ async def test_delete_batch_chunks(session, feed, monkeypatch):
     assert len(deletes) == 2 * 3, (
         f"5 条按每批 2 条应该分 3 批、每批 2 条 DELETE，实际 {len(deletes)} 条"
     )
+
+
+async def test_prune_by_feed(session, feed):
+    """清理一个源里「没人真读过也没人收藏」的条目
+
+    保留条件是**跨用户**的：别人真读过 / 收藏过的条目必须留下（那是别人的阅读历史），
+    拿当前用户去判就会把它们删掉。
+    """
+    repo = EntryRepository(session)
+    ts = datetime(1970, 1, 1, tzinfo=UTC)
+
+    user1 = User(username="prune-u1", password_hash="hash")
+    user2 = User(username="prune-u2", password_hash="hash")
+    session.add_all([user1, user2])
+    await session.flush()
+
+    free = Entry(feed_id=feed.id, guid="free", fetched=ts)
+    starred = Entry(feed_id=feed.id, guid="starred", fetched=ts)
+    read_by_other = Entry(feed_id=feed.id, guid="read-by-other", fetched=ts)
+    session.add_all([free, starred, read_by_other])
+    await session.flush()
+
+    session.add(Enclosure(entry_id=free.id, href="https://example.com/free.mp3"))
+    session.add(StarState(user_id=user2.id, entry_id=starred.id, timestamp=ts))
+    session.add(ReadState(user_id=user2.id, entry_id=read_by_other.id, timestamp=ts))
+    # 「标为已读但没真读过」：不保护条目，而且要被清掉
+    session.add(ReadState(user_id=user1.id, entry_id=read_by_other.id))
+    await session.commit()
+
+    assert await repo.prune_by_feed(feed.id) == 2  # 剩下 star 和 read-by-other
+
+    left = {entry.guid for entry in await repo.list_by_feed(feed.id)}
+    assert left == {"starred", "read-by-other"}
+    # 被删条目的附件跟着走
+    assert await session.scalar(select(func.count()).select_from(Enclosure)) == 0
+    # 无时间戳的已读状态被清掉，user2 真读过的那条留着
+    assert list(await session.scalars(select(ReadState.user_id))) == [user2.id]
+
+
+async def test_prune_by_feed_cleans_states_without_deleting(session, feed):
+    """一条条目都不用删时，仍要清掉「标为已读但没真读过」的状态
+
+    这一步不能搭在 delete_batch 的提交上——后者在没有条目要删时会直接返回、不提交。
+    """
+    repo = EntryRepository(session)
+    ts = datetime(1970, 1, 1, tzinfo=UTC)
+
+    user = User(username="prune-keep", password_hash="hash")
+    session.add(user)
+    await session.flush()
+
+    kept = Entry(feed_id=feed.id, guid="kept", fetched=ts)
+    session.add(kept)
+    await session.flush()
+    session.add(StarState(user_id=user.id, entry_id=kept.id, timestamp=ts))
+    session.add(ReadState(user_id=user.id, entry_id=kept.id))
+    await session.commit()
+
+    assert await repo.prune_by_feed(feed.id) == 1
+    assert await session.scalar(select(func.count()).select_from(Entry)) == 1
+    assert await session.scalar(select(func.count()).select_from(ReadState)) == 0
+
+
+async def test_prune_by_feed_empty(session, feed):
+    """源里没有条目时返回 0——调用方据此把整个源删掉"""
+    assert await EntryRepository(session).prune_by_feed(feed.id) == 0
 
 
 async def test_entry_count(session, feed_factory):

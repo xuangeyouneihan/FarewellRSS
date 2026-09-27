@@ -4,22 +4,13 @@ from datetime import datetime
 from ..db.models import Entry, Feed
 from ..db.repositories.entry import EntryRepository
 from ..enums import Filtering, SortOrder
-from .read_state import ReadStateService
-from .star_state import StarStateService
 
 _logger = logging.getLogger(__name__)
 
 
 class EntryService:
-    def __init__(
-        self,
-        repository: EntryRepository,
-        read_state_service: ReadStateService,
-        star_state_service: StarStateService,
-    ):
+    def __init__(self, repository: EntryRepository):
         self._repository = repository
-        self._read_state_service = read_state_service
-        self._star_state_service = star_state_service
 
     async def get(self, id_: int) -> Entry | None:
         return await self._repository.get(id_)
@@ -120,26 +111,14 @@ class EntryService:
             user_id, start, end, include, exclude, sorting, cursor, limit, history
         )
 
-    async def prune_by_feed(self, feed: Feed) -> list[Entry]:
-        result = []
-        to_be_deleted = []
-        entries = await self.list_by_feed(feed)
-        read_counts = await self._read_state_service.read_count_batch(entries)
-        star_counts = await self._star_state_service.star_count_batch(entries)
-        for entry in entries:
-            await self._read_state_service.prune_by_entry(entry)
-            if star_counts.get(entry.id, 0) == 0 and read_counts.get(entry.id, 0) == 0:
-                to_be_deleted.append(entry)
-            else:
-                result.append(entry)
-        _logger.debug(
-            "清理订阅 %d 的条目，删除 %d 条，保留 %d 条",
-            feed.id,
-            len(to_be_deleted),
-            len(result),
-        )
-        await self._repository.delete_batch([entry.id for entry in to_be_deleted])
-        return result
+    async def prune_by_feed(self, feed: Feed) -> int:
+        """清掉某个源里「没人真读过也没人收藏」的条目，返回该源还剩多少条目（0 = 已空）
+
+        SQL、跨用户保留条件和事务都在 repository 里（下移之前这里是逐条 ORM 判断：
+        取回整个源的条目、批量数计数、逐条清状态再批量删，50 条条目要一百多条 SQL）。
+        调用方 `FeedService.prune` 看返回值真假（0 即空）决定要不要删掉整个源。
+        """
+        return await self._repository.prune_by_feed(feed.id)
 
     async def entry_count(self, feed: Feed) -> int:
         return await self._repository.entry_count(feed.id)

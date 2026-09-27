@@ -52,11 +52,7 @@ def build_services(session: AsyncSession) -> ServiceBundle:
     """
     read_state = ReadStateService(repository=ReadStateRepository(session=session))
     star_state = StarStateService(repository=StarStateRepository(session=session))
-    entry = EntryService(
-        repository=EntryRepository(session=session),
-        read_state_service=read_state,
-        star_state_service=star_state,
-    )
+    entry = EntryService(repository=EntryRepository(session=session))
     feed = FeedService(repository=FeedRepository(session=session), entry_service=entry)
     subscription = SubscriptionService(
         repository=SubscriptionRepository(session=session),
