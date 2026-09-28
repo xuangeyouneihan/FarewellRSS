@@ -46,7 +46,10 @@ async def list_subscriptions(
     for subscription in subscriptions:
         feed = feed_map.get(subscription.feed_id)
         if not feed:
-            await subscription_service.unsubscribe(subscription)
+            # 源不在了（只可能来自「数订阅数」与「删源」之间的竞态）：这里只跳过，
+            # **不写库**——读取路径不做破坏性操作，清理交给 scheduler 的
+            # prune_orphan_subscriptions。
+            _logger.debug("订阅 %d 指向的源已不存在，跳过", subscription.feed_id)
             continue
         label = (
             label_map.get(subscription.folder_id)

@@ -961,6 +961,43 @@ async def test_auth_get_token_user_info_and_xml_negotiation(client: AsyncClient)
     assert r.status_code == 501, r.text
 
 
+async def test_subscription_list_is_read_only(client: AsyncClient):
+    """subscription/list 是读接口：源不在了只跳过，不顺手删订阅
+
+    清理交给 scheduler.prune_orphan_subscriptions —— 维护任务的活，不该让（会被轮询 /
+    预取 / 重放的）GET 承担。
+    """
+    from sqlalchemy import text
+
+    from farewell_rss.db.db import get_session
+
+    headers = await _register(client, "subscription-readonly")
+    with patch("farewell_rss.services.feed.fetch", side_effect=_fake_fetch):
+        r = await client.post(
+            f"{BASE}/subscription/edit",
+            data={"ac": "subscribe", "s": "feed/https://example.com/readonly.xml"},
+            headers=headers,
+        )
+    assert r.status_code == 200, r.text
+
+    # 直接删源，绕开「只删没有订阅者的源」那道保护，造出孤儿订阅
+    async for session in client._transport.app.dependency_overrides[get_session]():
+        await session.execute(
+            text("DELETE FROM feeds WHERE id IN (SELECT feed_id FROM subscriptions)")
+        )
+        await session.commit()
+        break
+
+    r = await client.get(f"{BASE}/subscription/list", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["subscriptions"] == []  # 列表里不出现
+
+    # 但订阅行还在：读取路径没有写库（清理是 scheduler 的事）
+    async for session in client._transport.app.dependency_overrides[get_session]():
+        assert await session.scalar(text("SELECT count(*) FROM subscriptions")) == 1
+        break
+
+
 async def test_subscription_edit_lifecycle_and_validation(client: AsyncClient):
     """subscription/edit 的 subscribe/edit/unsubscribe 分支和错误参数"""
     headers = await _register(client, "subscription-user")

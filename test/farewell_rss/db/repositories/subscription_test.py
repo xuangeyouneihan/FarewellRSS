@@ -114,6 +114,38 @@ async def test_subscription_count_batch(session, user, feed, monkeypatch):
     assert await repo.subscription_count_batch([]) == {}
 
 
+async def test_prune_orphan_subscriptions(session, user, feed):
+    """删掉指向已不存在源的订阅；正常订阅（包括别人的）不受影响；幂等"""
+    repo = SubscriptionRepository(session)
+
+    gone = Feed(
+        href="https://example.com/gone.xml",
+        title="会被删掉的源",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    user2 = User(username="orphan-sub-u2", password_hash="hash")
+    session.add_all([gone, user2])
+    await session.flush()
+
+    session.add_all([
+        Subscription(user_id=user.id, feed_id=feed.id),  # 正常
+        Subscription(user_id=user2.id, feed_id=feed.id),  # 正常（别人的）
+        Subscription(user_id=user.id, feed_id=gone.id),  # 孤儿
+    ])
+    await session.commit()
+
+    # 直接删掉源，绕开「只删没有订阅者的源」那道保护，造出孤儿订阅
+    await session.delete(gone)
+    await session.commit()
+
+    assert await repo.prune_orphan_subscriptions() == 1
+    assert [(s.user_id, s.feed_id) for s in await repo.list_by_user(user.id)] == [
+        (user.id, feed.id)
+    ]
+    assert len(await repo.list_by_user(user2.id)) == 1
+    assert await repo.prune_orphan_subscriptions() == 0  # 幂等
+
+
 async def test_list_by_user(session, user, feed):
     repo = SubscriptionRepository(session)
 

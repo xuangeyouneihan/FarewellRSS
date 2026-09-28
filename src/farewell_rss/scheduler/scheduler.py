@@ -121,5 +121,9 @@ async def run() -> None:
         # 清理单独开一个 session：抓取和清理是两件独立的事，
         # 不共享事务也就不存在"抓取失败连累清理"的情况
         async with SessionLocal() as session:
-            await prune_orphan_feeds(build_services(session))
+            services = build_services(session)
+            # 先扫掉指向已不存在源的订阅（正常不该有，见那个方法的注释），再清理
+            # 孤儿源 —— 两者都是「用扫描表达状态」的幂等清理
+            await services.subscription.prune_orphan_subscriptions()
+            await prune_orphan_feeds(services)
         await asyncio.sleep(_REFRESH_INTERVAL)

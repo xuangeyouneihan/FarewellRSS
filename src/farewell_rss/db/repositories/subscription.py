@@ -1,9 +1,9 @@
 import logging
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Subscription
+from ..models import Feed, Subscription
 from ._chunking import chunked
 
 _logger = logging.getLogger(__name__)
@@ -139,3 +139,23 @@ class SubscriptionRepository:
             )
             counts.update((row[0], row[1]) for row in result.all())
         return counts
+
+    async def prune_orphan_subscriptions(self) -> int:
+        """删掉指向已不存在源的订阅（幂等），返回删除条数。
+
+        正常路径上不该有这种订阅：删源那边保证「只删没有订阅者的源」。但「数订阅数」
+        和「删源」之间是个竞态窗口（用户恰好在那时订阅了这个源），而且 FK 在 SQLite
+        默认不强制，所以这里做一次状态扫描兑底——和孤儿源回收同一个思路：
+        **用扫描表达状态，而不是在读取路径上顺手修**。
+        """
+        orphan = ~exists(select(1).where(Feed.id == Subscription.feed_id))
+        # 先数再删：AsyncSession.execute() 的返回类型上没有 rowcount，而且这样能
+        # 只在真有孤儿时记日志（正常情况下每轮都是 0）
+        count = await self._session.scalar(
+            select(func.count()).select_from(Subscription).where(orphan)
+        )
+        if count:
+            _logger.info("清理 %d 条指向已不存在源的订阅", count)
+        await self._session.execute(delete(Subscription).where(orphan))
+        await self._session.commit()
+        return count or 0

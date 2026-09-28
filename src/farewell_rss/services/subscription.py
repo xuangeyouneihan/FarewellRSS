@@ -133,3 +133,7 @@ class SubscriptionService:
 
     async def subscription_count_batch(self, feed_ids: list[int]) -> dict[int, int]:
         return await self._repository.subscription_count_batch(feed_ids)
+
+    async def prune_orphan_subscriptions(self) -> int:
+        """删掉指向已不存在源的订阅（幂等），返回删除条数；由 scheduler 每轮调"""
+        return await self._repository.prune_orphan_subscriptions()
