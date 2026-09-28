@@ -17,7 +17,7 @@ from farewell_rss.db.models import (
 )
 from farewell_rss.db.repositories import _chunking
 from farewell_rss.db.repositories.entry import EntryRepository
-from farewell_rss.feed_fetcher.feed_fetcher import FetchedEntry
+from farewell_rss.feed_fetcher.feed_fetcher import FetchedEnclosure, FetchedEntry
 
 
 @pytest_asyncio.fixture
@@ -288,6 +288,59 @@ async def test_upsert_by_feed(session, feed_factory):
         assert result2[i].fetched == final_entries[i]["fetched"]
 
     assert await repo.list_by_feed(feed2.id) == []
+
+
+async def test_upsert_by_feed_deduplicates_within_batch(session, feed):
+    """同一次抓取里出现重复 guid 时不能插两条
+
+    有些源就是会重复列同一条目。按 guid 预取 existing 的做法是「快照」，如果插入后不
+    把新对象放回 map，第二条同 guid 会被当成新条目 → 直接撞 uq_entries_feed_guid。
+    """
+    repo = EntryRepository(session)
+    fetched = [
+        FetchedEntry(guid="dup-guid", title="第一次"),
+        FetchedEntry(guid="dup-guid", title="第二次"),
+    ]
+
+    await repo.upsert_by_feed(feed.id, fetched)
+
+    rows = [
+        entry for entry in await repo.list_by_feed(feed.id) if entry.guid == "dup-guid"
+    ]
+    assert len(rows) == 1
+    assert rows[0].title == "第二次"  # 后一条覆盖前一条，和逐条查的旧行为一致
+
+
+async def test_upsert_by_feed_without_per_entry_queries(session, feed):
+    """批量 upsert 里不能有「每条一次 SELECT」的 N+1
+
+    每轮只该有 2 条 SELECT：① 按 guid 预取已存在的条目；② 按 entry_id 预取旧附件。
+    逐条查的写法会是 1 + N（条目）+ N（附件）条。
+    """
+    executed: list[str] = []
+
+    # 监听要挂在本测试第一次用 session 之前
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def _record(conn, cursor, statement, params, context, executemany):
+        executed.append(statement)
+
+    repo = EntryRepository(session)
+    fetched = [
+        FetchedEntry(
+            guid=f"nq-{i}",
+            title="x",
+            enclosures=[FetchedEnclosure(href=f"https://example.com/{i}.mp3")],
+        )
+        for i in range(5)
+    ]
+
+    await repo.upsert_by_feed(feed.id, fetched)  # 第一轮：全是插入
+    await repo.upsert_by_feed(feed.id, fetched)  # 第二轮：全是更新（附件有变化）
+
+    selects = [s for s in executed if s.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == 4, (
+        f"两轮共发了 {len(selects)} 条 SELECT（每轮应 2 条：guid 预取 + 附件预取）"
+    )
 
 
 async def test_delete_batch(session, feed):

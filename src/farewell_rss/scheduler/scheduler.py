@@ -28,8 +28,12 @@ async def _update_all_feeds(
     feeds = await feed_service.list_()
     semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
 
+    subscription_counts = await subscription_service.subscription_count_batch([
+        f.id for f in feeds
+    ])
+
     async def _update_one(feed):
-        if await subscription_service.subscription_count(feed) <= 0:
+        if feed.id not in subscription_counts:
             _logger.info(
                 "订阅源 %s（%d）没有订阅者，跳过更新",
                 feed.title or feed.href,
@@ -74,15 +78,29 @@ async def prune_orphan_feeds(services: ServiceBundle) -> list[int]:
     所有删除路径，且不需要让用户请求承担破坏性操作。
     """
     deleted: list[int] = []
-    for feed in await services.feed.list_():
+    # 源列表只取一次：取两次的话，两次查询之间新建的源/订阅会让判断不一致
+    # （第二个列表里的源可能在计数里查不到，被当成孤儿）。计数也一次批量查完，
+    # 不再是「每个源一次 COUNT」。
+    feeds = await services.feed.list_()
+    subscription_counts = await services.subscription.subscription_count_batch([
+        f.id for f in feeds
+    ])
+    for feed in feeds:
         feed_id = feed.id
-        if await services.subscription.subscription_count(feed) > 0:
+        if feed_id in subscription_counts:
             continue
         _logger.info(
             "订阅源 %s（%d）没有订阅者，尝试清理", feed.title or feed.href, feed_id
         )
-        if await services.feed.prune(feed) is None:
-            deleted.append(feed_id)
+        try:
+            if await services.feed.prune(feed) is None:
+                deleted.append(feed_id)
+        except Exception:
+            # 单个源出错不能把整轮清理带走：run() 的 while True 没有兜底，异常跑出去
+            # 这个任务就再也不会醒来了（对齐 _update_one 的做法）
+            _logger.exception(
+                "清理订阅源 %s（%d）时发生错误", feed.title or feed.href, feed_id
+            )
     if deleted:
         _logger.info("已清理 %d 个孤儿源：%s", len(deleted), deleted)
     return deleted

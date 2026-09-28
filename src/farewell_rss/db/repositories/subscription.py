@@ -112,3 +112,30 @@ class SubscriptionRepository:
             .where(Subscription.feed_id == feed_id)
         )
         return result.scalar_one()
+
+    async def subscription_count_batch(self, feed_ids: list[int]) -> dict[int, int]:
+        """批量查这些源的订阅人数：{feed_id: 人数}。
+
+        对应 SQL：
+            SELECT feed_id, count(*) FROM subscriptions
+            WHERE feed_id IN (...) GROUP BY feed_id
+        （主键是 (user_id, feed_id)，所以一个 feed_id 的 count(*) 就是订阅人数）
+
+        **没人订阅的源不会出现在结果里**（GROUP BY 天然如此），调用方要用
+        `.get(feed_id, 0)`，不能直接 `counts[feed_id]`。
+
+        `IN (...)` 的参数个数有硬上限（见 _chunking），所以按批查、把结果并起来。
+        """
+        if not feed_ids:
+            _logger.debug("批量查询订阅人数，ids 为空")
+            return {}
+        _logger.debug("批量查询 %d 个源的订阅人数", len(feed_ids))
+        counts: dict[int, int] = {}
+        for batch in chunked(feed_ids):
+            result = await self._session.execute(
+                select(Subscription.feed_id, func.count())
+                .where(Subscription.feed_id.in_(batch))
+                .group_by(Subscription.feed_id)
+            )
+            counts.update((row[0], row[1]) for row in result.all())
+        return counts

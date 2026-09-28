@@ -138,6 +138,56 @@ async def test_update_by_entry(session, entry_factory):
     assert set(result_control2) == {enclosure_control}
 
 
+async def test_update_by_entries(session, entry_factory):
+    """一次给多个条目对账附件；没点名的条目不能被碰
+
+    注意 `{entry_id: []}` 的语义是「清空该条目的附件」，不是「不动」。
+    """
+    repo = EnclosureRepository(session)
+
+    entry1 = await entry_factory()
+    entry2 = await entry_factory()
+    entry3 = await entry_factory()  # 没点名的对照条目
+
+    session.add_all([
+        Enclosure(entry_id=entry1.id, href="https://example.com/a.mp3", length=1),
+        Enclosure(entry_id=entry1.id, href="https://example.com/b.mp3", length=2),
+        Enclosure(entry_id=entry2.id, href="https://example.com/c.mp3", length=3),
+        Enclosure(entry_id=entry3.id, href="https://example.com/d.mp3", length=4),
+    ])
+    await session.commit()
+
+    result = await repo.update_by_entries({
+        # 删 a、保留并更新 b、加 e
+        entry1.id: [
+            FetchedEnclosure(href="https://example.com/b.mp3", length=20),
+            FetchedEnclosure(href="https://example.com/e.mp3", length=5),
+        ],
+        # 空列表 = 清空
+        entry2.id: [],
+    })
+
+    assert set(result) == {entry1.id, entry2.id}
+    assert result[entry2.id] == []
+
+    result1 = await repo.list_by_entry(entry1.id)
+    result1.sort(key=lambda e: e.href)
+    assert [(e.href, e.length) for e in result1] == [
+        ("https://example.com/b.mp3", 20),
+        ("https://example.com/e.mp3", 5),
+    ]
+    assert await repo.list_by_entry(entry2.id) == []
+    # 没点名的条目原样不动
+    result3 = await repo.list_by_entry(entry3.id)
+    assert [e.href for e in result3] == ["https://example.com/d.mp3"]
+
+    # 空字典是空操作
+    assert await repo.update_by_entries({}) == {}
+    assert [e.href for e in await repo.list_by_entry(entry3.id)] == [
+        "https://example.com/d.mp3"
+    ]
+
+
 async def test_delete_by_entry(session, entry_factory):
     repo = EnclosureRepository(session)
 

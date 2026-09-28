@@ -55,6 +55,9 @@ async def test_batch_methods_split_large_id_lists(session):
         "subscription.get_batch": lambda: SubscriptionRepository(session).get_batch(
             1, ids
         ),
+        "subscription.subscription_count_batch": lambda: SubscriptionRepository(
+            session
+        ).subscription_count_batch(ids),
         "read_state.get_batch": lambda: ReadStateRepository(session).get_batch(1, ids),
         "star_state.get_batch": lambda: StarStateRepository(session).get_batch(1, ids),
         "read_state.read_count_batch": lambda: ReadStateRepository(

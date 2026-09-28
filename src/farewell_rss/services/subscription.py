@@ -130,3 +130,6 @@ class SubscriptionService:
 
     async def subscription_count(self, feed: Feed) -> int:
         return await self._repository.subscription_count(feed.id)
+
+    async def subscription_count_batch(self, feed_ids: list[int]) -> dict[int, int]:
+        return await self._repository.subscription_count_batch(feed_ids)

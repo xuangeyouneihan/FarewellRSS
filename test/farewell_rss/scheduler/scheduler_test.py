@@ -113,3 +113,31 @@ async def test_prune_is_idempotent(session):
 
     assert await prune_orphan_feeds(build_services(session)) == [feed.id]
     assert await prune_orphan_feeds(build_services(session)) == []
+
+
+async def test_prune_survives_one_bad_feed(session, monkeypatch):
+    """单个源清理出错不能带走整轮清理
+
+    run() 的 while True 没有兜底：异常跑出去这个调度任务就再也不会醒来了，
+    所以 per-feed 的异常必须在这里吞掉并记日志（对齐 _update_one 的做法）。
+    """
+    bad = await _add_feed(session, "https://example.com/bad.xml")
+    good = await _add_feed(session, "https://example.com/good.xml")
+    await _add_entry(session, bad, "g1")
+    await _add_entry(session, good, "g2")
+    await session.commit()
+
+    services = build_services(session)
+    original_prune = services.feed.prune
+
+    async def flaky_prune(feed):
+        if feed.id == bad.id:
+            raise RuntimeError("boom")
+        return await original_prune(feed)
+
+    monkeypatch.setattr(services.feed, "prune", flaky_prune)
+
+    # 坏源排在前面（先建的），它抛异常后好的那个仍然要被清掉
+    assert await prune_orphan_feeds(services) == [good.id]
+    assert await session.scalar(select(Feed).where(Feed.id == good.id)) is None
+    assert await session.scalar(select(Feed).where(Feed.id == bad.id)) is not None

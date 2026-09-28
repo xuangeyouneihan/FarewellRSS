@@ -77,6 +77,43 @@ async def test_get_batch(session, user, feed, monkeypatch):
     assert await repo.get_batch(user.id, [feed.id, feed2.id]) == result
 
 
+async def test_subscription_count_batch(session, user, feed, monkeypatch):
+    """批量统计订阅人数；没人订阅的源不会出现在结果里，调用方得用 .get(id, 0)"""
+    repo = SubscriptionRepository(session)
+
+    feed2 = Feed(
+        href="https://example.com/feed2.xml",
+        title="源 2",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    feed3 = Feed(
+        href="https://example.com/feed3.xml",
+        title="没人订阅",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    user2 = User(username="sub-count-u2", password_hash="hash")
+    session.add_all([feed2, feed3, user2])
+    await session.flush()
+
+    session.add_all([
+        Subscription(user_id=user.id, feed_id=feed.id),
+        Subscription(user_id=user2.id, feed_id=feed.id),  # feed 有 2 人
+        Subscription(user_id=user.id, feed_id=feed2.id),  # feed2 有 1 人
+        # feed3 没人订阅
+    ])
+    await session.commit()
+
+    ids = [feed.id, feed2.id, feed3.id]
+    result = await repo.subscription_count_batch(ids)
+    assert result == {feed.id: 2, feed2.id: 1}
+    assert result.get(feed3.id, 0) == 0  # 没订阅的源不会出现在字典里
+
+    # 批次小到 1 时每个源一次查询，结果必须合并而不是覆盖
+    monkeypatch.setattr(_chunking, "MAX_IDS_PER_STATEMENT", 1)
+    assert await repo.subscription_count_batch(ids) == result
+    assert await repo.subscription_count_batch([]) == {}
+
+
 async def test_list_by_user(session, user, feed):
     repo = SubscriptionRepository(session)
 
