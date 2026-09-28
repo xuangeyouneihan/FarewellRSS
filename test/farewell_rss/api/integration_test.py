@@ -1153,6 +1153,37 @@ async def test_stream_filters_pagination_search_and_item_endpoints(client: Async
     assert "continuation" in r.json()
 
 
+async def test_search_syntax_error_is_a_client_error(client: AsyncClient):
+    """查询串本身有问题 → 400（用户少打一个引号不该算服务器故障）"""
+    headers = await _register(client, "search-syntax-user")
+    await _subscribe(client, headers)
+
+    # 引号不闭合（FTS5 报 unterminated string）、空表达式（报 fts5: syntax error）
+    # 和只有空白（会变成 LIKE '%%' 把整库倒出来）
+    for bad in ("%22炒饭指南", "炒饭%20AND", "%20"):
+        r = await client.get(
+            f"{BASE}/stream/contents/user/-/search/{bad}", headers=headers
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["detail"]["code"] == "InvalidSearchQueryError"
+
+    # 对照组：同一个端点，正常查询照样 200
+    r = await client.get(
+        f"{BASE}/stream/contents/user/-/search/炒饭指南", headers=headers
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["items"]) == 3
+
+    # 短查询（2 字，trigram 索引里没有这种 gram）走 LIKE 兜底，照样搜得到
+    r = await client.get(f"{BASE}/stream/contents/user/-/search/炒饭", headers=headers)
+    assert r.status_code == 200, r.text
+    assert {item["title"] for item in r.json()["items"]} == {
+        "《炒饭指南》第一章",
+        "《炒饭指南》第二章",
+        "《炒饭指南》第三章",
+    }
+
+
 async def test_label_lifecycle_and_type_specific_streams(client: AsyncClient):
     """folder/tag 创建、重命名、删除及同名流类型选择"""
     headers = await _register(client, "label-user")

@@ -16,7 +16,7 @@ from farewell_rss.db.models import (
     User,
 )
 from farewell_rss.db.repositories import _chunking
-from farewell_rss.db.repositories.entry import EntryRepository
+from farewell_rss.db.repositories.entry import EntryRepository, short_query_tokens
 from farewell_rss.feed_fetcher.feed_fetcher import FetchedEnclosure, FetchedEntry
 
 
@@ -557,3 +557,137 @@ async def test_search(session, feed):
 
     with pytest.raises(OperationalError):
         await repo.search('"异步编程')
+
+
+async def test_search_routes_short_query_to_like(session, feed):
+    """1~2 个字符退回 LIKE，≥3 字符才走 FTS5（trigram 索引里没有 3 字以下的 gram）"""
+    executed: list[str] = []
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def _record(conn, cursor, statement, params, context, executemany):
+        executed.append(statement)
+
+    repo = EntryRepository(session)
+    session.add(
+        Entry(
+            feed_id=feed.id,
+            guid="route",
+            title="协程与事件循环",
+            fetched=datetime(1970, 1, 1, tzinfo=UTC),
+        )
+    )
+    await session.commit()
+
+    # 2 字：FTS5 会给 0 条，只有 LIKE 能查到
+    results = await repo.search("协程")
+    assert [e.guid for e in results] == ["route"]
+    assert "LIKE" in executed[-1]
+    assert "entry_fts" not in executed[-1]
+
+    results = await repo.search("协程与事件")
+    assert [e.guid for e in results] == ["route"]
+    assert "entry_fts MATCH" in executed[-1]
+
+
+async def test_search_short_query_pagination_and_escaping(session, feed):
+    """短查询兜底：按有效时间降序分页，且 `_`/`%` 当字面量而不是通配符"""
+    repo = EntryRepository(session)
+    session.add_all([
+        Entry(
+            feed_id=feed.id,
+            guid="s0",
+            title="协程与事件循环",
+            fetched=datetime(1970, 1, 1, tzinfo=UTC),
+        ),
+        Entry(
+            feed_id=feed.id,
+            guid="s1",
+            title="炒饭要大火",
+            fetched=datetime(1970, 1, 2, tzinfo=UTC),
+        ),
+        Entry(
+            feed_id=feed.id,
+            guid="s2",
+            title="循环往复",
+            fetched=datetime(1970, 1, 3, tzinfo=UTC),
+        ),
+    ])
+    await session.commit()
+
+    # 命中 s0/s2，按有效时间降序 → s2 在前；offset 能翻页、越界返回空
+    assert [e.guid for e in await repo.search("循环", limit=1)] == ["s2"]
+    assert [e.guid for e in await repo.search("循环", limit=1, offset=1)] == ["s0"]
+    assert await repo.search("循环", limit=1, offset=2) == []
+
+    # 通配符不转义的话：「循环_」会匹配「循环往复」（一个任意字符）、
+    # 「循环%」会把这俩都捞出来
+    assert await repo.search_substring(["循环_"]) == []
+    assert await repo.search_substring(["循环%"]) == []
+    assert len(await repo.search_substring(["循环"])) == 2
+    # 空词表不能让 `%%` 把整个库倒出来
+    assert await repo.search_substring([]) == []
+
+
+def test_short_query_tokens_only_for_plain_all_short_queries():
+    """兜底分岁规则：只看词，不看整串长度；带 FTS 语法的一律不退"""
+    assert short_query_tokens("编程") == ["编程"]
+    assert short_query_tokens("炒饭 火候") == ["炒饭", "火候"]
+    # 整串 5 个字符，但两个词都短 → 仍然要兜底（实测 FTS5 给 0 条）
+    assert short_query_tokens("异步 编程") == ["异步", "编程"]
+    # 有长词 → 交给 FTS5
+    assert short_query_tokens("异步编程") is None
+    assert short_query_tokens("异步编程 协程") is None
+    # 带 FTS 语法的不猜意思（短语/布尔/前缀/列限定/行首锚）
+    assert short_query_tokens('"炒饭 火候"') is None
+    assert short_query_tokens("协程 OR 编程") is None
+    assert short_query_tokens("炒饭 AND 火候") is None
+    assert short_query_tokens("编程*") is None
+    assert short_query_tokens("title:编程") is None
+    assert short_query_tokens("^炒饭") is None
+    # 空查询走另一条路（服务层拦成 400）
+    assert short_query_tokens("") is None
+    assert short_query_tokens("   ") is None
+
+
+async def test_search_multi_short_tokens_match_all_words(session, feed):
+    """全是短词的多词查询：按词 AND（不要求相邻），而不是把整串当一个子串
+
+    LIKE 的 `%炒饭 火候%` 要求连那个空格都原样出现，基本搜不到东西；
+    用户敲两个词的意思是「都要有」。
+    """
+    repo = EntryRepository(session)
+    session.add_all([
+        Entry(
+            feed_id=feed.id,
+            guid="both",
+            title="炒饭 火候",
+            fetched=datetime(1970, 1, 1, tzinfo=UTC),
+        ),
+        Entry(
+            feed_id=feed.id,
+            guid="only-one",
+            title="炒饭指南",
+            content_plain="别的都在正文里",
+            fetched=datetime(1970, 1, 2, tzinfo=UTC),
+        ),
+        Entry(
+            feed_id=feed.id,
+            guid="cross-column",
+            title="火候基本法",
+            content_plain="先说炒饭",
+            fetched=datetime(1970, 1, 3, tzinfo=UTC),
+        ),
+    ])
+    await session.commit()
+
+    # 两个词分居标题和正文也算命中（和 FTS 一样看三列）
+    assert sorted(e.guid for e in await repo.search("炒饭 火候")) == [
+        "both",
+        "cross-column",
+    ]
+    # 带 FTS 语法的短词查询不兜底，一律按 FTS5 解释，能不能命中看索引里有没有对应的
+    # gram：整串 `"炒饭 火候"` 是一个短语，trigram 是**按整串**取 gram（空格也算一个
+    # 字符），标题里原样出现 → 命中；而下面两个形态里含短词，索引里没有那些 gram → 0 条
+    assert [e.guid for e in await repo.search('"炒饭 火候"')] == ["both"]
+    assert await repo.search("炒饭 OR 火候") == []
+    assert await repo.search("炒饭*") == []

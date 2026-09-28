@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, status
 from ..db.models import Entry, LabelType, User
 from ..enums import Filtering, SortOrder
 from ..services.entry import EntryService
+from ..services.exceptions import InvalidSearchQueryError
 from ..services.feed import FeedService
 from ..services.label import LabelService
 from ..services.read_state import ReadStateService
@@ -254,7 +255,20 @@ async def _resolve_stream(
             # 搜索走 FTS5 的 rank 排序 + OFFSET 分页，和上面那套 keyset 分页不是一回事，
             # 所以自己算 continuation 并提前返回
             offset = int(c, 16) if c else 0
-            found = await entry_service.search(q[14:], limit=n + 1, offset=offset)
+            try:
+                found = await entry_service.search(q[14:], limit=n + 1, offset=offset)
+            except InvalidSearchQueryError as e:
+                _logger.warning(
+                    "用户 %s（%d）搜索时查询串语法错误：%s",
+                    user.username,
+                    user.id,
+                    q[14:],
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    # 不能用 type(e)：本函数有个叫 type 的查询参数，把内置 type 遮蔽了
+                    detail={"code": e.__class__.__name__, "detail": str(e)},
+                ) from e
             continuation = None
             if len(found) > n:
                 continuation = f"{offset + n:016x}"

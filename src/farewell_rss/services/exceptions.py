@@ -70,3 +70,16 @@ class ValueError(ServiceError, builtins.ValueError, ABC):
 
 class SlashInUsernameError(ValueError):
     log_message = "用户名中不允许包含斜杠（/）"
+
+
+class InvalidSearchQueryError(ValueError):
+    """搜索查询串 FTS5 解析不了（引号不闭合、运算符用错、括号不配对……）
+
+    是用户打错了，不是服务器故障，所以 API 层对应 400。
+    """
+
+    log_message = "搜索查询语法错误"
+
+    @classmethod
+    def from_query(cls, query: str) -> InvalidSearchQueryError:
+        return cls(f"{cls.log_message}（{query}）")

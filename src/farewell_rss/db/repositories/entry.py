@@ -12,6 +12,55 @@ from .enclosure import EnclosureRepository
 
 _logger = logging.getLogger(__name__)
 
+MIN_TRIGRAM_QUERY = 3
+"""FTS5 的 trigram 分词器只索引 3 字 gram，短于 3 个字符的词在索引里根本不存在。
+
+实测（条目标题「异步编程 协程」）：`协`/`协程`/`编程`/`异步` 都是 0 条，`异步编`
+（3 字）起才有结果；而且**整串长度不算数**，要看词 —— `异步 编程`（5 个字符）
+照样 0 条。所以短词查询只能退回 LIKE 逐条比对。
+"""
+
+_FTS_SYNTAX = ('"', "*", "(", ")", ":", "^")
+"""带这些字符的查询按 FTS5 语法解释（短语/前缀/括号/列限定/行首锚），不猜它的意思"""
+
+_FTS_OPERATORS = {"AND", "OR", "NOT"}
+
+
+def short_query_tokens(query: str) -> list[str] | None:
+    """纯短词查询 → 返回词表（该退回 LIKE 兜底）；其它一律 None（交给 FTS5）
+
+    会退回的只有「朴素查询且每个词都短于 3 个字符」：`编程`、`炒饭 火候`。
+    带 FTS 语法的不退（`"炒饭 火候"` 短语、`协程 OR 编程` 布尔、`编程*` 前缀、
+    `title:编程` 列限定）—— 这些查询的意思只有 FTS5 说得清，而索引里既然没有
+    那些短词的 gram，它们就是 0 条，不许用 LIKE 猜出一个像是对的结果。
+    """
+    if any(char in query for char in _FTS_SYNTAX):
+        return None
+    tokens = query.split()
+    if not tokens or any(token.upper() in _FTS_OPERATORS for token in tokens):
+        return None
+    if all(len(token) < MIN_TRIGRAM_QUERY for token in tokens):
+        return tokens
+    return None
+
+
+def _escape_like(value: str) -> str:
+    """转义 LIKE 的通配符（调用处用 escape 参数指定反斜杠）
+
+    不转义的话，搜 `_` 会变成「任意一个字符」、搜 `%` 会把整个库倒出来。
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _matches_token(token: str):
+    """该词在 title / content_plain / summary_plain 任一列里出现（和 FTS 索引的列一致）"""
+    pattern = f"%{_escape_like(token)}%"
+    return or_(
+        Entry.title.like(pattern, escape="\\"),
+        Entry.content_plain.like(pattern, escape="\\"),
+        Entry.summary_plain.like(pattern, escape="\\"),
+    )
+
 
 def _effective_seconds():
     """「有效时间」的秒级时间戳：published > updated > fetched 取其一后截断到秒。
@@ -551,7 +600,14 @@ class EntryRepository:
         return result
 
     async def search(self, query: str, limit: int = 20, offset: int = 0) -> list[Entry]:
-        """FTS5 全文搜索，支持布尔表达式和短语"""
+        """全文搜索：走 FTS5（支持布尔表达式和短语），全是短词的朴素查询退回 LIKE
+
+        分岔规则在 `short_query_tokens` 里（要按词判，不能只看整串长度：`异步 编程`
+        5 个字符，但两个词都短，FTS5 索引里都不存在）。
+        """
+        tokens = short_query_tokens(query)
+        if tokens is not None:
+            return await self.search_substring(tokens, limit, offset)
         _logger.debug("搜索条目: %s", query)
         result = await self._session.execute(
             select(Entry).from_statement(
@@ -564,5 +620,29 @@ class EntryRepository:
                 )
             ),
             {"query": query, "limit": limit, "offset": offset},
+        )
+        return list(result.scalars().all())
+
+    async def search_substring(
+        self, tokens: list[str], limit: int = 20, offset: int = 0
+    ) -> list[Entry]:
+        """短词兜底：每个词都要在三列里出现（AND，不要求相邻），按有效时间降序分页
+
+        **是全表扫描**：前导通配符用不上任何索引（好在 `ix_entries_page` 的排序键
+        正好是这里的 order_by，排序不用额外代价）。这是「两字词也能搜到」的代价 ——
+        FTS5 的 trigram 索引里没有这些词的 gram，短词没有别的走法。
+
+        多词时用 AND 而不是「整串当一个子串」：LIKE 的 `%炒饭 火候%` 要求原样连着
+        出现（含那个空格），基本搜不到东西，而用户敲两个词的意思是「都要有」。
+        """
+        if not tokens:
+            return []
+        _logger.debug("短词查询走 LIKE 全表扫描: %s", tokens)
+        result = await self._session.execute(
+            select(Entry)
+            .where(and_(*[_matches_token(token) for token in tokens]))
+            .order_by(_effective_seconds().desc(), Entry.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
