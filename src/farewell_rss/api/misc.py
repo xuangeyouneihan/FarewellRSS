@@ -91,18 +91,16 @@ async def unread_count(
         if tag_id in label_map
     ]
 
-    unread_counts = (
-        [
-            {
-                "id": "user/-/state/com.google/reading-list",
-                "count": total_unread,
-                "newestItemTimestampUsec": str(overall_newest_id),
-            }
-        ]
-        + feed_unread_counts
-        + folder_unread_counts
-        + tag_unread_counts
-    )  # tag 的计数永远在 folder 的计数之后，以区分同名 folder 和 tag
+    unread_counts = [
+        {
+            "id": "user/-/state/com.google/reading-list",
+            "count": total_unread,
+            "newestItemTimestampUsec": str(overall_newest_id),
+        },
+        *feed_unread_counts,
+        *folder_unread_counts,
+        *tag_unread_counts,
+    ]  # tag 的计数永远在 folder 的计数之后，以区分同名 folder 和 tag
 
     return {"max": total_unread, "unreadcounts": unread_counts}
 
@@ -149,7 +147,9 @@ async def export_opml(
             for sub, feed in items:
                 _make_outline(body, sub, feed)
         else:
-            folder_el = ET.SubElement(body, "outline", text=folder_map[folder_id_2].name)
+            folder_el = ET.SubElement(
+                body, "outline", text=folder_map[folder_id_2].name
+            )
             for sub, feed in items:
                 _make_outline(folder_el, sub, feed)
 

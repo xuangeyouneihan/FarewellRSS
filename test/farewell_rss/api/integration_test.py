@@ -15,7 +15,10 @@ from farewell_rss.feed_fetcher.feed_fetcher import (
 
 # ─── 测试数据 ────────────────────────────────────────────────────────────
 
-_A = lambda n: FetchedAuthor(name=n, href=None, email=None)
+
+def _A(n: str) -> FetchedAuthor:
+    return FetchedAuthor(name=n, href=None, email=None)
+
 
 TEST_FEED = FetchedFeed(
     href="https://example.com/test.xml",

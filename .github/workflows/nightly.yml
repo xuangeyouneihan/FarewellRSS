@@ -1,0 +1,45 @@
+name: Nightly (latest dependencies)
+
+"on":
+  schedule:
+    - cron: "0 3 * * *" # 每天 UTC 03:00（北京时间 11:00）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-dependencies:
+    name: Test with the newest dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # 故意 --upgrade：不看 uv.lock，直接拿上游最新版。它只回答一个问题 ——
+      # 上游发了新版本之后，这套代码还能不能过测试。
+      # （2026-10-01 就是这个组合暴露了「装出来起不来」：SQLAlchemy 2.1
+      #   把 greenlet 的平台声明去掉了，而依赖只写了裸的 sqlalchemy>=…）
+      - name: Install dependencies, upgrading everything
+        run: uv sync --dev --upgrade --index-url https://pypi.org/simple
+
+      # 把解析出来的版本打进日志：失败时第一眼就能看到是哪个包升上来的
+      - name: Report resolved versions
+        run: uv pip list
+
+      # 里面包含启动冒烟（test/farewell_rss/startup_test.py），所以「最新依赖还能不能起」
+      # 也一并验了
+      - name: Run backend tests
+        run: uv run pytest test/ -q

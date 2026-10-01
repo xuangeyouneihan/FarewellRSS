@@ -43,6 +43,11 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      # 只检查不改（仓库里的 pnpm lint 带 --fix，进了 CI 会「自动改完然后通过」）
+      - name: Run frontend lint
+        working-directory: frontend
+        run: pnpm lint-check
+
       - name: Run frontend checks
         working-directory: frontend
         run: pnpm build
@@ -54,11 +59,23 @@ jobs:
       - name: Install backend dependencies
         run: uv sync --dev --index-url https://pypi.org/simple
 
+      - name: Run backend lint
+        run: uv run ruff check
+
+      - name: Run backend type checks
+        run: uv run mypy
+
       - name: Run backend tests
         run: uv run pytest test/ -q
 
       - name: Build Python package
         run: uv build
+
+      - name: Smoke test the installed wheel
+        run: |
+          python3 -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet "$(ls -t dist/*.whl | head -1)" pytest
+          /tmp/smoke/bin/python -m pytest test/farewell_rss/startup_test.py -q
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7

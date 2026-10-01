@@ -34,7 +34,7 @@ def test_default_is_bounded_by_cpu_count():
 @pytest.mark.parametrize("raw", ["0", "-1", "1.5", "abc", ""])
 def test_invalid_value_fails_fast(raw):
     """非法配置必须在启动时就炸，不能静默兜底成某个值"""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="FAREWELL_RSS_PASSWORD_MAX_CONCURRENCY"):
         _resolve_max_workers(raw)
 
 

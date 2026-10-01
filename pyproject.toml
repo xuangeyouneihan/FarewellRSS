@@ -14,7 +14,7 @@ dependencies = [
     "fastapi>=0.139.0",
     "feedparser>=6.0.12",
     "python-multipart>=0.0.32",
-    "sqlalchemy>=2.0.51",
+    "sqlalchemy[asyncio]>=2.0.51",
     "uvicorn[standard]>=0.51.0",
     "winuvloop>=0.2.4",
 ]
@@ -43,14 +43,61 @@ packages = ["src/farewell_rss"]
 [tool.hatch.build.targets.sdist.force-include]
 "frontend/dist" = "frontend/dist"
 
+[tool.mypy]
+# 只查 src：test/ 还有 40 个存量类型谎报（transport.app、**dict 展开、sort(key=...)
+# 的 Optional 之类），要一起查得先把那批清掉，另开一件事。
+files = ["src/farewell_rss"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+strict_equality = true
+# 不开 warn_return_any：SQLAlchemy 的 session.scalar() 在 mypy 眼里是 Any，
+# 四个 repository 会因此各报一条 no-any-return（实测 4 条，属类型标注噪音）。
+
+[tool.ruff]
+# 规则集要钉死在仓库里：不然「有多少告警」取决于装了哪版编辑器扩展。
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9", "F", # 基本盘：未定义名、import 错位这类
+    "I",   # import 排序
+    "B",   # bugbear：可变默认参数、不该吞异常之类
+    "UP",  # pyupgrade：老写法换新写法（项目是 3.14）
+    "SIM", "C4", "ISC", # 简化 / 推导式 / 隐式字符串拼接
+    "RUF", # ruff 自家规则（RUF006 asyncio 悬空任务就在里面）
+    "ASYNC", # 协程里混进阻塞调用 —— 这个仓库对「不许在协程里阻塞」是有纪律的
+    "PT",  # pytest 风格
+]
+ignore = [
+    # 中文标点（「」《》：、）会被判成「易混淆字符」。实测报 1534 次，纯噪音
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # raise ... from e 会改掉 traceback 的呈现方式，15 处存量先不动
+    "B904",
+    # (str, Enum) → StrEnum 会改 str() 的行为，可能是接口可见的，先不动
+    "UP042",
+]
+# 不开 E501（行长）：最长行 141（SQL 和中文注释），88 会报 38 处，
+# 设 line-length 只是把噪音换个数字。也不开 ruff format（会重排 12 个文件，另说）。
+
+[tool.ruff.lint.per-file-ignores]
+# 这两条是明确要保留的（元组里的隐式字符串拼接）
+"test/farewell_rss/db/db_test.py" = ["ISC004"]
+# 这里的 import 不在顶部是刻意的：必须先 load_dotenv 才能 import 应用模块
+"src/farewell_rss/main.py" = ["E402"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "mypy==1.15.*",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
+    "ruff==0.16.*",
 ]

@@ -102,7 +102,7 @@ async def test_init_db_creates_indexes(initialized_engine):
             rows = await conn.execute(text(f"PRAGMA index_list('{table}')"))
             found |= {row[1] for row in rows.fetchall()}
 
-    assert INDEX_NAMES <= found
+    assert found >= INDEX_NAMES
 
 
 async def test_init_db_is_idempotent(initialized_engine):
@@ -119,7 +119,7 @@ def test_models_declare_expected_indexes():
         index.name for table in Base.metadata.tables.values() for index in table.indexes
     }
 
-    assert INDEX_NAMES <= declared
+    assert declared >= INDEX_NAMES
 
 
 async def test_init_db_restores_missing_indexes(monkeypatch, tmp_path):
@@ -147,7 +147,7 @@ async def test_init_db_restores_missing_indexes(monkeypatch, tmp_path):
 
     await db_module.init_db()
 
-    assert INDEX_NAMES <= await index_names()
+    assert await index_names() >= INDEX_NAMES
     await engine.dispose()
 
 

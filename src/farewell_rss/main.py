@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import logging.config
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -155,13 +156,12 @@ if _FRONTEND_DIST:
             # 静态文件（favicon 等在 dist 根目录）存在则直接返回
             if full_path:
                 candidate = os.path.join(_FRONTEND_DIST, full_path)
-                if os.path.isfile(candidate):
+                # 本地 stat（几微秒），为它开线程不值得；ASYNC240 想拦的是慢 IO
+                if os.path.isfile(candidate):  # noqa: ASYNC240
                     return FileResponse(candidate)
             return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
 
-    _logger.info("前端静态文件目录: %s", _FRONTEND_DIST)
 else:
-    _logger.warning("未找到前端构建产物（frontend/dist 或包内 static），仅提供 API")
 
     @app.get("/")
     async def root():
@@ -195,6 +195,16 @@ def main() -> None:
         "root": {"level": "WARNING", "handlers": ["default"]},
     }
 
+    # 自己先把日志装好，再打下面这条「前端产物找到了没」：它原来写在模块级（import
+    # 时执行），那一刻日志还没配、级别默认 WARNING，所以 INFO 永远看不到——
+    # 「为什么只有 API 没有前端」的原因连同它一起消失。装好后交给 uvicorn
+    # （log_config=None）别再配一遍。
+    logging.config.dictConfig(LOG_CONFIG)
+    if _FRONTEND_DIST:
+        _logger.info("前端静态文件目录: %s", _FRONTEND_DIST)
+    else:
+        _logger.warning("未找到前端构建产物（frontend/dist 或包内 static），仅提供 API")
+
     host = os.getenv("FAREWELL_RSS_HOST", "0.0.0.0")
     port = int(os.getenv("FAREWELL_RSS_PORT", "3000"))
-    uvicorn.run(app, host=host, port=port, loop="asyncio", log_config=LOG_CONFIG)
+    uvicorn.run(app, host=host, port=port, loop="asyncio", log_config=None)
