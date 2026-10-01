@@ -62,6 +62,18 @@ def _matches_token(token: str):
     )
 
 
+def _subscribed_feed_ids(user_id: int):
+    """该用户当前订阅的源 id —— 搜索的范围
+
+    `entries` 是所有用户共用的表（源也是共享的），搜索不带这个条件就等于「谁都能搜到
+    别人订阅源里的文章」。语义对齐 reading-list：只看**当前**订阅，不追旧订阅。
+
+    FTS5 那条路没法复用这个表达式（要 JOIN 出 `entry_fts` 才用得上 `rank`，所以那里是
+    原生 SQL），在那边写的是等价的一行子查询 —— 两条路都有测试钉着范围。
+    """
+    return select(Subscription.feed_id).where(Subscription.user_id == user_id)
+
+
 def _effective_seconds():
     """「有效时间」的秒级时间戳：published > updated > fetched 取其一后截断到秒。
 
@@ -599,15 +611,19 @@ class EntryRepository:
         _logger.debug("订阅 %d 的条目数量为 %d", feed_id, result)
         return result
 
-    async def search(self, query: str, limit: int = 20, offset: int = 0) -> list[Entry]:
+    async def search(
+        self, query: str, user_id: int, limit: int = 20, offset: int = 0
+    ) -> list[Entry]:
         """全文搜索：走 FTS5（支持布尔表达式和短语），全是短词的朴素查询退回 LIKE
+
+        两条路都**只搜该用户订阅的源**（见 `_subscribed_feed_ids`）。
 
         分岔规则在 `short_query_tokens` 里（要按词判，不能只看整串长度：`异步 编程`
         5 个字符，但两个词都短，FTS5 索引里都不存在）。
         """
         tokens = short_query_tokens(query)
         if tokens is not None:
-            return await self.search_substring(tokens, limit, offset)
+            return await self.search_substring(tokens, user_id, limit, offset)
         _logger.debug("搜索条目: %s", query)
         result = await self._session.execute(
             select(Entry).from_statement(
@@ -615,18 +631,28 @@ class EntryRepository:
                     "SELECT e.* FROM entries e "
                     "JOIN entry_fts ON e.id = entry_fts.rowid "
                     "WHERE entry_fts MATCH :query "
+                    "AND e.feed_id IN ("
+                    "SELECT feed_id FROM subscriptions WHERE user_id = :user_id"
+                    ") "
                     "ORDER BY rank "
                     "LIMIT :limit OFFSET :offset"
                 )
             ),
-            {"query": query, "limit": limit, "offset": offset},
+            {
+                "query": query,
+                "user_id": user_id,
+                "limit": limit,
+                "offset": offset,
+            },
         )
         return list(result.scalars().all())
 
     async def search_substring(
-        self, tokens: list[str], limit: int = 20, offset: int = 0
+        self, tokens: list[str], user_id: int, limit: int = 20, offset: int = 0
     ) -> list[Entry]:
         """短词兜底：每个词都要在三列里出现（AND，不要求相邻），按有效时间降序分页
+
+        范围同 `search`（只搜自己订阅的源）—— 兜底这条路也不能漏掉范围条件。
 
         **是全表扫描**：前导通配符用不上任何索引（好在 `ix_entries_page` 的排序键
         正好是这里的 order_by，排序不用额外代价）。这是「两字词也能搜到」的代价 ——
@@ -640,6 +666,7 @@ class EntryRepository:
         _logger.debug("短词查询走 LIKE 全表扫描: %s", tokens)
         result = await self._session.execute(
             select(Entry)
+            .where(Entry.feed_id.in_(_subscribed_feed_ids(user_id)))
             .where(and_(*[_matches_token(token) for token in tokens]))
             .order_by(_effective_seconds().desc(), Entry.id.desc())
             .limit(limit)

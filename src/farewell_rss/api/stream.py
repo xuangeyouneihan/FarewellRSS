@@ -256,7 +256,9 @@ async def _resolve_stream(
             # 所以自己算 continuation 并提前返回
             offset = int(c, 16) if c else 0
             try:
-                found = await entry_service.search(q[14:], limit=n + 1, offset=offset)
+                found = await entry_service.search(
+                    q[14:], user.id, limit=n + 1, offset=offset
+                )
             except InvalidSearchQueryError as e:
                 _logger.warning(
                     "用户 %s（%d）搜索时查询串语法错误：%s",

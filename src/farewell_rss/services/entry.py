@@ -144,8 +144,10 @@ class EntryService:
     async def entry_count(self, feed: Feed) -> int:
         return await self._repository.entry_count(feed.id)
 
-    async def search(self, query: str, limit: int = 20, offset: int = 0) -> list[Entry]:
-        """全文搜索
+    async def search(
+        self, query: str, user_id: int, limit: int = 20, offset: int = 0
+    ) -> list[Entry]:
+        """全文搜索，**只搜该用户当前订阅的源**
 
         三种「查询串本身有问题」的情况都在这里拦住，别让它们变成 500：
 
@@ -158,7 +160,7 @@ class EntryService:
         if not query.strip():
             raise InvalidSearchQueryError.from_query(query)
         try:
-            return await self._repository.search(query, limit, offset)
+            return await self._repository.search(query, user_id, limit, offset)
         except OperationalError as e:
             if _is_fts5_syntax_error(e):
                 raise InvalidSearchQueryError.from_query(query) from e

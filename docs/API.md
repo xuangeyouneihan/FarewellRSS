@@ -170,11 +170,11 @@
 | `user/-/state/farewell-rss/history`    | 阅读历史（扩展）           | 全部（含已退订的源）     |
 | `feed/{id}`                            | 单个订阅源                 | 仅当前订阅               |
 | `user/-/label/{name}`                  | 文件夹/标签（FOLDER 优先） | folder：仅当前订阅；tag：全部（含已退订的源） |
-| `user/-/search/{query}`                | FTS5 全文搜索（扩展）      | 库内全部条目（不受订阅限制） |
+| `user/-/search/{query}`                | FTS5 全文搜索（扩展）      | 仅当前订阅               |
 
 > **「范围」的含义，以及两对不再互补的流**：退订（`subscription/edit` 的 `ac=unsubscribe`）只删除订阅关系，并丢弃「标为已读但从没打开过」的状态（`ReadState.timestamp IS NULL`）；**真正读过的历史（`ReadState` 带 timestamp）和收藏（`StarState`）都会保留**，对应条目在孤儿源清理时也会被留下。于是上表分两类：
 >
-> - **按当前订阅算**：`reading-list`、`unread`、`feed/{id}`，以及 `user/-/label/{name}` 的 folder 形态。
+> - **按当前订阅算**：`reading-list`、`unread`、`feed/{id}`、`user/-/search/{query}`（搜索），以及 `user/-/label/{name}` 的 folder 形态。
 > - **按用户全部数据算（含已退订的源）**：`read`、`starred`、`starred-uncategorized`、`history`，以及 `user/-/label/{name}` 的 tag 形态。
 >
 > 由此有两对流**不再互补**，客户端不要拿它们做对账：
@@ -188,7 +188,7 @@
 
 > **已读 vs 阅读历史**：`user/-/state/com.google/read` 返回所有**有已读状态**的条目，包含批量操作（`mark-all-as-read`）标记的那些；`user/-/state/farewell-rss/history` 只返回**真正读过**的条目（已读状态带时间戳），也就是逐篇打开过的那种。两者排序与分页逻辑一致。
 
-> **搜索流说明**：`user/-/search/{query}` 使用 SQLite FTS5 全文搜索，支持布尔表达式（`python OR go`）、短语（`"hello world"`）、列限定（`title:python`）。搜索结果按相关性（BM25）排序，`r` 参数被忽略。分页通过 `n`（limit）和 `c`（continuation = offset 的 hex）控制，与普通流兼容。
+> **搜索流说明**：`user/-/search/{query}` 使用 SQLite FTS5 全文搜索，支持布尔表达式（`python OR go`）、短语（`"hello world"`）、列限定（`title:python`）。搜索结果按相关性（BM25）排序，`r` 参数被忽略。分页通过 `n`（limit）和 `c`（continuation = offset 的 hex）控制，与普通流兼容。**搜索只搜当前用户订阅的源**（语义同 `reading-list`）：别人的订阅源里的文章搜不到，退订后也不再出现在搜索结果里。
 >
 > **短词查询与非法查询**：FTS5 的 trigram 分词器只索引 3 字 gram，短于 3 个字符的**词**在索引里根本不存在 —— 按词算，不是按整串长度：`异步 编程` 整串 5 个字符、两个词都短，实测照样 0 条。所以「朴素查询且每个词都短于 3 个字符」（`编程`、`协程`、`炒饭 火候`）会自动退回 `LIKE '%x%'` 全表扫描：多词按「每个词都要出现（AND）、不要求相邻」匹配，只看 `title` / `content_plain` / `summary_plain` 三列，按有效时间降序返回，`r` 也被忽略。实测代价（3 万条、正文约 800 字）：有命中约 **2ms**（按时间倒序扫索引，凑够一页就停），无命中约 **240ms**（必须扫完整个库）。带 FTS 语法的查询一律按 FTS5 解释、不走兜底（短语 `"炒饭 火候"`、布尔 `协程 OR 编程`、前缀 `编程*`、列限定 `title:编程`），能不能命中就看索引里有没有对应的 gram（trigram 是**按整串**取 gram 的，空格也算一个字符，所以 `"炒饭 火候"` 这样的整串短语仍然能命中，而布尔/前缀形态里含短词就是 0 条）；也不要用 LIKE 去猜这类查询的意思。另外注意：**不走兜底的多词查询按 FTS5 的短语语义解释（要求相邻）**，想要「都要有」就显式写 `AND`。查询串本身不合法时返回 **400**，而不是 500：引号不闭合（`"编程`）、运算符/括号错（`编程 AND`、`()`）、以及空查询（`/search/` 后面什么都没有或只有空白 —— 否则 `LIKE '%%'` 会把整个库倒出来）。错误体形如 `{"detail": {"code": "InvalidSearchQueryError", "detail": "搜索查询语法错误（…）"}}`。
 

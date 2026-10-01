@@ -1187,6 +1187,54 @@ async def test_search_syntax_error_is_a_client_error(client: AsyncClient):
     }
 
 
+async def test_search_is_scoped_to_my_subscriptions(client: AsyncClient):
+    """搜索只搜自己订阅的源：别人的源里的文章搜不到
+
+    `entries` 是所有用户共用的（源也是共享的），搜索不带订阅范围的话，A 搜一个词就能
+    读到 B 订阅的源里的文章 —— 这条就是那个越权读的回归测试。
+    """
+    mine = FetchedFeed(
+        href="https://example.com/mine.xml",
+        title="我的源",
+        entries=[FetchedEntry(guid="mine-1", title="我的文章：香菜炒饭")],
+    )
+    theirs = FetchedFeed(
+        href="https://example.com/theirs.xml",
+        title="别人的源",
+        entries=[FetchedEntry(guid="theirs-1", title="别人的文章：秘制炒饭")],
+    )
+
+    async def _fetch(url, etag=None, modified=None):
+        return mine if url.endswith("mine.xml") else theirs
+
+    headers_a = await _register(client, "search-scope-a")
+    headers_b = await _register(client, "search-scope-b")
+    with patch("farewell_rss.services.feed.fetch", side_effect=_fetch):
+        for headers, url in ((headers_a, mine.href), (headers_b, theirs.href)):
+            r = await client.post(
+                f"{BASE}/subscription/quickadd",
+                data={"quickadd": url},
+                headers=headers,
+            )
+            assert r.status_code == 200, r.text
+
+    async def _search(headers: dict, query: str) -> list[str]:
+        r = await client.get(
+            f"{BASE}/stream/contents/user/-/search/{query}", headers=headers
+        )
+        assert r.status_code == 200, r.text
+        return [it["title"] for it in r.json()["items"]]
+
+    assert await _search(headers_a, "香菜炒饭") == ["我的文章：香菜炒饭"]
+    # 别人的：一条都不该有
+    assert await _search(headers_a, "秘制炒饭") == []
+    # 对照：B 搜自己的还是搜得到（证明不是把搜索结果整个干掉了）
+    assert await _search(headers_b, "秘制炒饭") == ["别人的文章：秘制炒饭"]
+    # 短词兜底那条路（2 字）也要带范围：两个源的文章都含「炒饭」
+    assert await _search(headers_a, "炒饭") == ["我的文章：香菜炒饭"]
+    assert await _search(headers_b, "炒饭") == ["别人的文章：秘制炒饭"]
+
+
 async def test_label_lifecycle_and_type_specific_streams(client: AsyncClient):
     """folder/tag 创建、重命名、删除及同名流类型选择"""
     headers = await _register(client, "label-user")

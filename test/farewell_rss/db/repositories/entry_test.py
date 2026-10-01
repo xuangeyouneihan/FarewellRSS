@@ -13,6 +13,7 @@ from farewell_rss.db.models import (
     Feed,
     ReadState,
     StarState,
+    Subscription,
     User,
 )
 from farewell_rss.db.repositories import _chunking
@@ -536,9 +537,23 @@ async def test_entry_count(session, feed_factory):
     assert count == 2
 
 
+async def _subscriber(session, *feeds) -> int:
+    """造一个订阅了这些源的用户，返回 user_id
+
+    搜索是按订阅范围过滤的，所以测试得先有订阅关系。
+    """
+    user = User(username=f"u{feeds[0].id}", password_hash="h")
+    session.add(user)
+    await session.flush()
+    session.add_all(Subscription(user_id=user.id, feed_id=f.id) for f in feeds)
+    await session.commit()
+    return user.id
+
+
 async def test_search(session, feed):
     """FTS5 搜索应能找到匹配内容"""
     repo = EntryRepository(session)
+    user_id = await _subscriber(session, feed)
 
     entry = Entry(
         feed_id=feed.id,
@@ -551,16 +566,18 @@ async def test_search(session, feed):
     session.add(entry)
     await session.commit()
 
-    results = await repo.search("异步编程")
+    results = await repo.search("异步编程", user_id)
     assert len(results) == 1
     assert results[0].id == entry.id
 
     with pytest.raises(OperationalError):
-        await repo.search('"异步编程')
+        await repo.search('"异步编程', user_id)
 
 
 async def test_search_routes_short_query_to_like(session, feed):
     """1~2 个字符退回 LIKE，≥3 字符才走 FTS5（trigram 索引里没有 3 字以下的 gram）"""
+    # 监听要挂在本测试第一次用 session 之前，所以先建订阅者
+    user_id = await _subscriber(session, feed)
     executed: list[str] = []
 
     @event.listens_for(session.get_bind(), "before_cursor_execute")
@@ -579,12 +596,12 @@ async def test_search_routes_short_query_to_like(session, feed):
     await session.commit()
 
     # 2 字：FTS5 会给 0 条，只有 LIKE 能查到
-    results = await repo.search("协程")
+    results = await repo.search("协程", user_id)
     assert [e.guid for e in results] == ["route"]
     assert "LIKE" in executed[-1]
     assert "entry_fts" not in executed[-1]
 
-    results = await repo.search("协程与事件")
+    results = await repo.search("协程与事件", user_id)
     assert [e.guid for e in results] == ["route"]
     assert "entry_fts MATCH" in executed[-1]
 
@@ -592,6 +609,7 @@ async def test_search_routes_short_query_to_like(session, feed):
 async def test_search_short_query_pagination_and_escaping(session, feed):
     """短查询兜底：按有效时间降序分页，且 `_`/`%` 当字面量而不是通配符"""
     repo = EntryRepository(session)
+    user_id = await _subscriber(session, feed)
     session.add_all([
         Entry(
             feed_id=feed.id,
@@ -615,17 +633,19 @@ async def test_search_short_query_pagination_and_escaping(session, feed):
     await session.commit()
 
     # 命中 s0/s2，按有效时间降序 → s2 在前；offset 能翻页、越界返回空
-    assert [e.guid for e in await repo.search("循环", limit=1)] == ["s2"]
-    assert [e.guid for e in await repo.search("循环", limit=1, offset=1)] == ["s0"]
-    assert await repo.search("循环", limit=1, offset=2) == []
+    assert [e.guid for e in await repo.search("循环", user_id, limit=1)] == ["s2"]
+    assert [e.guid for e in await repo.search("循环", user_id, limit=1, offset=1)] == [
+        "s0"
+    ]
+    assert await repo.search("循环", user_id, limit=1, offset=2) == []
 
     # 通配符不转义的话：「循环_」会匹配「循环往复」（一个任意字符）、
     # 「循环%」会把这俩都捞出来
-    assert await repo.search_substring(["循环_"]) == []
-    assert await repo.search_substring(["循环%"]) == []
-    assert len(await repo.search_substring(["循环"])) == 2
+    assert await repo.search_substring(["循环_"], user_id) == []
+    assert await repo.search_substring(["循环%"], user_id) == []
+    assert len(await repo.search_substring(["循环"], user_id)) == 2
     # 空词表不能让 `%%` 把整个库倒出来
-    assert await repo.search_substring([]) == []
+    assert await repo.search_substring([], user_id) == []
 
 
 def test_short_query_tokens_only_for_plain_all_short_queries():
@@ -656,6 +676,7 @@ async def test_search_multi_short_tokens_match_all_words(session, feed):
     用户敲两个词的意思是「都要有」。
     """
     repo = EntryRepository(session)
+    user_id = await _subscriber(session, feed)
     session.add_all([
         Entry(
             feed_id=feed.id,
@@ -681,13 +702,62 @@ async def test_search_multi_short_tokens_match_all_words(session, feed):
     await session.commit()
 
     # 两个词分居标题和正文也算命中（和 FTS 一样看三列）
-    assert sorted(e.guid for e in await repo.search("炒饭 火候")) == [
+    assert sorted(e.guid for e in await repo.search("炒饭 火候", user_id)) == [
         "both",
         "cross-column",
     ]
     # 带 FTS 语法的短词查询不兜底，一律按 FTS5 解释，能不能命中看索引里有没有对应的
     # gram：整串 `"炒饭 火候"` 是一个短语，trigram 是**按整串**取 gram（空格也算一个
     # 字符），标题里原样出现 → 命中；而下面两个形态里含短词，索引里没有那些 gram → 0 条
-    assert [e.guid for e in await repo.search('"炒饭 火候"')] == ["both"]
-    assert await repo.search("炒饭 OR 火候") == []
-    assert await repo.search("炒饭*") == []
+    assert [e.guid for e in await repo.search('"炒饭 火候"', user_id)] == ["both"]
+    assert await repo.search("炒饭 OR 火候", user_id) == []
+    assert await repo.search("炒饭*", user_id) == []
+
+
+async def test_search_only_covers_the_users_own_subscriptions(session, feed):
+    """搜索只搜自己订阅的源 —— FTS 和短词兜底两条路都得带范围
+
+    `entries` 是所有用户共用的表（源也是共享的），不带范围的话 A 搜一个词就能读到
+    B 订阅的源里的文章。
+    """
+    other = Feed(
+        href="https://example.com/other.xml",
+        title="别人的源",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    session.add(other)
+    await session.commit()
+
+    mine_user = await _subscriber(session, feed)
+    other_user = await _subscriber(session, other)
+    session.add_all([
+        Entry(
+            feed_id=feed.id,
+            guid="mine",
+            title="我的文章 香菜炒饭",
+            fetched=datetime(1970, 1, 1, tzinfo=UTC),
+        ),
+        Entry(
+            feed_id=other.id,
+            guid="theirs",
+            title="别人的文章 秘制炒饭",
+            fetched=datetime(1970, 1, 1, tzinfo=UTC),
+        ),
+    ])
+    await session.commit()
+
+    repo = EntryRepository(session)
+
+    # FTS 那条路（≥3 字）
+    assert [e.guid for e in await repo.search("香菜炒饭", mine_user)] == ["mine"]
+    assert await repo.search("秘制炒饭", mine_user) == []
+    assert [e.guid for e in await repo.search("秘制炒饭", other_user)] == ["theirs"]
+
+    # 短词兜底那条路（2 字 → LIKE）：两个源的文章都含「炒饭」，所以这里能不能只回
+    # 自己那条，完全取决于范围条件
+    assert [e.guid for e in await repo.search("炒饭", mine_user)] == ["mine"]
+    assert [e.guid for e in await repo.search("炒饭", other_user)] == ["theirs"]
+    assert await repo.search_substring(["秘制"], mine_user) == []
+    assert [e.guid for e in await repo.search_substring(["秘制"], other_user)] == [
+        "theirs"
+    ]
