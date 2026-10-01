@@ -233,6 +233,48 @@ async def test_update_all_feeds_writes_every_feed(
     assert [r.getMessage() for r in caplog.records] == []
 
 
+async def test_failed_fetch_leaves_no_half_state(
+    file_session_factory, monkeypatch, caplog
+):
+    """抓取中途失败：源元数据不能单独落库（否则 TTL 内不再重试，条目永久丢失）
+
+    repository 从「自行 commit」改成「只 flush」之后，一次抓取的源元数据 + 条目 +
+    附件才落在同一个事务里。这里让**条目阶段**失败（naive datetime：模型的
+    UTCDateTime 只接受 UTC，是真实的写入失败路径），而此时源的 fetched 已经因为
+    autoflush 落到了库上——事务边界一旦破了，它就会留下来，于是这个源在 TTL 内
+    被一直跳过，用户看到的是「源在那儿、但再也不更新」。
+
+    对照：上面 test_update_all_feeds_writes_every_feed 是「顺利抓取要写进去」。
+    """
+    await _seed_subscribed_feeds(file_session_factory, 1)
+    monkeypatch.setattr(scheduler, "SessionLocal", file_session_factory)
+
+    async def _bad_fetch(url, etag=None, modified=None):
+        return FetchedFeed(
+            href=url,
+            title=url,
+            fetched=_FETCHED,
+            entries=[
+                FetchedEntry(
+                    guid="bad-entry",
+                    title="坏条目",
+                    published=datetime(2024, 1, 1),  # 没有 tzinfo → 写库时抛错
+                )
+            ],
+        )
+
+    monkeypatch.setattr(feed_service_module, "fetch", _bad_fetch)
+    caplog.set_level(logging.ERROR, logger="farewell_rss.scheduler.scheduler")
+
+    await scheduler._update_all_feeds()
+
+    entries, refreshed = await _written(file_session_factory)
+    assert entries == 0, "条目阶段失败，却有条目落了库（半个事务）"
+    assert refreshed == 0, "源被标成『抓过了』，TTL 内不会再重试 → 条目永久丢失"
+    # 失败必须留下痕迹，不能静默
+    assert any("更新订阅源" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.filterwarnings("ignore::sqlalchemy.exc.SAWarning")
 async def test_shared_session_does_lose_writes(
     file_session_factory, monkeypatch, caplog

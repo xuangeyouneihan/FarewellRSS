@@ -93,18 +93,16 @@ class FeedRepository:
             self._session.add(result)
             await self._session.flush()
 
-        await self._entry_repository.upsert_by_feed(
-            result.id, feed.entries, commit=False
-        )
+        await self._entry_repository.upsert_by_feed(result.id, feed.entries)
 
-        await self._session.commit()
+        await self._session.flush()
 
         return result
 
     async def delete(self, feed: Feed) -> None:
         _logger.debug("删除订阅源 %d", feed.id)
         await self._session.delete(feed)
-        await self._session.commit()
+        await self._session.flush()
 
     async def touch(self, id_: int) -> None:
         """更新时间戳，用于 304 未修改时避免重复请求"""
@@ -112,4 +110,4 @@ class FeedRepository:
         feed = await self.get(id_)
         if feed:
             feed.fetched = datetime.now(UTC)
-            await self._session.commit()
+            await self._session.flush()

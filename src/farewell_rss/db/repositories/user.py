@@ -27,7 +27,7 @@ class UserRepository:
             is_admin=is_admin,
         )
         self._session.add(user)
-        await self._session.commit()
+        await self._session.flush()
         _logger.debug("注册用户 %d，用户名: %s", user.id, username)
         return user
 
@@ -64,13 +64,13 @@ class UserRepository:
             )
             return None
         user.username = new_username
-        await self._session.commit()
+        await self._session.flush()
         return user
 
     async def update_password(self, user: User, new_password_hash: str) -> User | None:
         _logger.debug("更新用户 %d 的密码", user.id)
         user.password_hash = new_password_hash
-        await self._session.commit()
+        await self._session.flush()
         return user
 
     async def update_profile(
@@ -78,21 +78,21 @@ class UserRepository:
     ) -> User | None:
         _logger.debug("更新用户 %d 的昵称: '%s'", user.id, friendly_name)
         user.friendly_name = friendly_name
-        await self._session.commit()
+        await self._session.flush()
         return user
 
     async def update_admin_state(self, user: User, is_admin: bool) -> User | None:
         _logger.debug("更新用户 %d 的管理员状态: %s", user.id, is_admin)
         user.is_admin = is_admin
-        await self._session.commit()
+        await self._session.flush()
         return user
 
     async def mark_as_deleted(self, user: User) -> None:
         _logger.debug("标记用户 %d 为已删除", user.id)
         user.deleted_at = datetime.now(UTC)
-        await self._session.commit()
+        await self._session.flush()
 
     async def delete(self, user: User) -> None:
         _logger.debug("永久删除用户 %d", user.id)
         await self._session.delete(user)
-        await self._session.commit()
+        await self._session.flush()

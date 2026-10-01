@@ -427,7 +427,7 @@ class EntryRepository:
         return list(result.scalars().all())
 
     async def upsert_by_feed(
-        self, feed_id: int, entries: list[FetchedEntry], commit: bool = True
+        self, feed_id: int, entries: list[FetchedEntry]
     ) -> list[Entry]:
         """按 guid 把抓来的条目 upsert 进某个源，返回落库后的 Entry 列表。
 
@@ -515,18 +515,10 @@ class EntryRepository:
         # flush。附件必须一次批量对账：逐条调 update_by_entry 是「每条一次 SELECT」
         # 的 N+1（upsert 一个 50 条的源就多 50 条查询）。
         await self._session.flush()
-        await self._enclosure_repository.update_by_entries(
-            {
-                row.id: fetched.enclosures
-                for row, fetched in zip(results, entries, strict=True)
-            },
-            commit=False,
-        )
-
-        if commit:
-            await self._session.commit()
-        else:
-            await self._session.flush()
+        await self._enclosure_repository.update_by_entries({
+            row.id: fetched.enclosures
+            for row, fetched in zip(results, entries, strict=True)
+        })
 
         return results
 
@@ -534,9 +526,10 @@ class EntryRepository:
         """批量删除条目及其附件。
 
         附件、条目各一条 SQL，按 `_chunking.MAX_IDS_PER_STATEMENT` 分批（`IN (...)`
-        的参数个数有硬上限，见那个模块），全部在同一个事务里提交——中途失败不会留下
-        「附件删了、条目还在」的半成品。逐条 delete + flush 的写法是 2N 条 SQL、N 次
-        COMMIT（实测 40 条＝80 条 SQL），分批后语句数只跟批次大小有关，跟条目数无关。
+        的参数个数有硬上限，见那个模块），全部落在同一个事务里（提交由 session 的
+        拥有者统一做）——中途失败不会留下「附件删了、条目还在」的半成品。逐条
+        delete + flush 的写法是 2N 条 SQL、N 次 COMMIT（实测 40 条＝80 条 SQL），
+        分批后语句数只跟批次大小有关，跟条目数无关。
 
         本方法只负责附件，read_states / star_states 不在这里删——那是调用方
         （下面的 prune_by_feed）的前提：只删既没人收藏也没人读过的条目。
@@ -545,10 +538,10 @@ class EntryRepository:
             _logger.debug("没有条目要删除")
             return
         for batch in chunked(entry_ids):
-            await self._enclosure_repository.delete_by_entries(batch, commit=False)
+            await self._enclosure_repository.delete_by_entries(batch)
             await self._session.execute(delete(Entry).where(Entry.id.in_(batch)))
         _logger.debug("删除条目 %d 条", len(entry_ids))
-        await self._session.commit()
+        await self._session.flush()
 
     async def prune_by_feed(self, feed_id: int) -> int:
         """清掉某个源里「没人真读过也没人收藏」的条目，返回该源还剩多少条目。
@@ -559,8 +552,7 @@ class EntryRepository:
         过滤的（给流查询用），拿其中一个用户去判会把别人读过/收藏的条目也删掉。
 
         「标为已读但没真读过」的状态（timestamp 为空）不保护条目，先清掉；这一步必须
-        在删条目之前（条目一没就找不到这些状态了），并且**不能在下面空列表时被短路**
-        ——`delete_batch` 在没有条目要删时直接返回不提交，所以末尾再兑一次底提交。
+        在删条目之前（条目一没就找不到这些状态了）。
 
         条目和附件交给 delete_batch（分批 + 同一个事务）。返回**剩余条数**而不是幸存
         条目列表：调用方只需知道「空了没有」（0 即空，据此删掉整个源），而把幸存条目
@@ -595,7 +587,7 @@ class EntryRepository:
         await self.delete_batch(doomed)
 
         remaining = await self.entry_count(feed_id)
-        await self._session.commit()
+        await self._session.flush()
         _logger.debug(
             "清理订阅 %d 的条目，删除 %d 条，剩 %d 条", feed_id, len(doomed), remaining
         )

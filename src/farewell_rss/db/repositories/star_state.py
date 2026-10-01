@@ -98,7 +98,7 @@ class StarStateRepository:
                 timestamp=timestamp,
             )
             self._session.add(star_state)
-        await self._session.commit()
+        await self._session.flush()
         return star_state
 
     async def clear_tag(self, tag_id: int) -> None:
@@ -106,21 +106,21 @@ class StarStateRepository:
         await self._session.execute(
             update(StarState).where(StarState.tag_id == tag_id).values(tag_id=None)
         )
-        await self._session.commit()
+        await self._session.flush()
 
     async def delete(self, user_id: int, entry_id: int) -> None:
         _logger.debug("删除收藏状态 %d/%d", user_id, entry_id)
         star_state = await self.get(user_id, entry_id)
         if star_state:
             await self._session.delete(star_state)
-            await self._session.commit()
+            await self._session.flush()
 
     async def delete_by_user(self, user_id: int) -> None:
         _logger.debug("删除用户 %d 的所有收藏状态", user_id)
         await self._session.execute(
             delete(StarState).where(StarState.user_id == user_id)
         )
-        await self._session.commit()
+        await self._session.flush()
 
     async def star_count(self, entry_id: int) -> int:
         _logger.debug("查询条目 %d 的收藏计数", entry_id)

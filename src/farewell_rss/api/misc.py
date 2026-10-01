@@ -189,7 +189,10 @@ async def import_opml(
     ],
     label_service: Annotated[LabelService, Depends(get_label_service)],
 ) -> Response:
-    """导入 OPML"""
+    """导入 OPML
+
+    单个源失败只跳过它自己（见 _import_outlines），其余照常导入。
+    """
     body = await request.body()
     if not body:
         _logger.warning(
@@ -214,33 +217,59 @@ async def import_opml(
             detail={"code": "InvalidOPML", "detail": "无效的 OPML XML"},
         )
 
-    async def _import_outlines(parent_el: ET.Element, folder_id: int | None):
+    async def _import_outlines(parent_el: ET.Element, folder_id: int | None) -> int:
+        """导入一层 outline，返回被跳过的条数。
+
+        **单个源/文件夹失败只跳过它自己**，不带走整份导入：subscribe 会同步抓一次
+        源，一个坏 URL、一次网络抖动都会抛异常；而请求级事务是整批提交的
+        （repository 只 flush），异常冒出去会把已经导好的全部回滚掉。
+        """
+        skipped = 0
         for outline in parent_el.findall("outline"):
-            xml_url = outline.get("xmlUrl") or outline.get("xmlurl")
-            if xml_url:
-                title = outline.get("title") or outline.get("text") or ""
-                await subscription_service.subscribe(
-                    user=user,
-                    feed_href=xml_url,
-                    title=title,
-                    folder_id=folder_id,
-                )
-            else:
-                name = outline.get("title") or outline.get("text") or ""
-                children = outline.findall("outline")
-                if name and children:
-                    folder = await label_service.get_by_user_name_type(
-                        user, name, LabelType.FOLDER
+            # 只捕 Exception：CancelledError 这类 BaseException 必须继续往上抛
+            try:
+                xml_url = outline.get("xmlUrl") or outline.get("xmlurl")
+                if xml_url:
+                    title = outline.get("title") or outline.get("text") or ""
+                    await subscription_service.subscribe(
+                        user=user,
+                        feed_href=xml_url,
+                        title=title,
+                        folder_id=folder_id,
                     )
-                    if not folder:
-                        folder = await label_service.create(
+                else:
+                    name = outline.get("title") or outline.get("text") or ""
+                    children = outline.findall("outline")
+                    if name and children:
+                        folder = await label_service.get_by_user_name_type(
                             user, name, LabelType.FOLDER
                         )
-                    await _import_outlines(outline, folder.id)
-                else:
-                    await _import_outlines(outline, folder_id)
+                        if not folder:
+                            folder = await label_service.create(
+                                user, name, LabelType.FOLDER
+                            )
+                        skipped += await _import_outlines(outline, folder.id)
+                    else:
+                        skipped += await _import_outlines(outline, folder_id)
+            except Exception:
+                skipped += 1
+                _logger.exception(
+                    "导入 OPML 时跳过一条 outline：%s",
+                    outline.get("xmlUrl")
+                    or outline.get("title")
+                    or outline.get("text")
+                    or "(无名)",
+                )
+        return skipped
 
     # 标准 OPML 的 outline 位于 <opml><body> 下；兼容旧的根级 outline 输入。
     body_el = root.find("body") if root.tag.lower() == "opml" else None
-    await _import_outlines(body_el if body_el is not None else root, None)
+    skipped = await _import_outlines(body_el if body_el is not None else root, None)
+    if skipped:
+        _logger.warning(
+            "用户 %s（%d）导入 OPML 完成，%d 条 outline 被跳过",
+            user.username,
+            user.id,
+            skipped,
+        )
     return Response("OK", media_type="text/plain")

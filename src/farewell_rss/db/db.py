@@ -112,14 +112,22 @@ async def init_db() -> None:
 
 
 async def get_session():
+    """**请求作用域的事务边界**：repository 只 flush，提交与回滚都归这里。
+
+    一个请求里跨 service 的多步写（quickadd 的 feed + subscription、批量已读的
+    “删旧状态 + 插新状态”……）因此落在同一个事务里：任何一步抛异常整批回滚，
+    不会留下半截状态。
+
+    需要“先落库、再触发后台作业”的地方（见 api/auth.py 的 DeleteAccount）要在
+    端点里显式 commit：后台作业自建 session，看不见未提交的数据。
+
+    （历史上这里不能用 `session.begin()` 包裹，因为 repository 会自行 commit、
+    提前关掉显式事务；repository 改成只 flush 之后这个限制不复存在。）
+    """
     async with SessionLocal() as session:
-        # 注意：repository 内部会自行 commit()（如 feed/subscription 的 upsert）。
-        # 因此这里不能再用 session.begin() 包裹，否则 repository 的 commit() 会
-        # 提前关闭显式事务，导致同一请求内后续的 session 操作报
-        # "Can't operate on closed transaction inside context manager"。
         try:
             yield session
-            # 请求结束时兜底提交（读操作的空提交也走这里，本地 SQLite 空提交代价可忽略）
+            # 请求结束时提交（读操作的空提交也走这里，本地 SQLite 空提交代价可忽略）
             await session.commit()
         except BaseException:
             await session.rollback()

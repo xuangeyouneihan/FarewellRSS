@@ -74,7 +74,6 @@ class ReadStateRepository:
         user_id: int,
         entry_id: int,
         timestamp: datetime | None = None,
-        commit: bool = True,
     ) -> ReadState:
         # timestamp 为 None 表示标为已读但不显示在历史记录里
         read_state = await self.get(user_id, entry_id)
@@ -88,10 +87,7 @@ class ReadStateRepository:
             )
             self._session.add(read_state)
 
-        if commit:
-            await self._session.commit()
-        else:
-            await self._session.flush()
+        await self._session.flush()
 
         return read_state
 
@@ -115,7 +111,7 @@ class ReadStateRepository:
                 rs = ReadState(user_id=user_id, entry_id=entry_id, timestamp=timestamp)
                 self._session.add(rs)
             results[entry_id] = rs
-        await self._session.commit()
+        await self._session.flush()
         return results
 
     async def delete(self, user_id: int, entry_id: int) -> None:
@@ -123,14 +119,14 @@ class ReadStateRepository:
         read_state = await self.get(user_id, entry_id)
         if read_state:
             await self._session.delete(read_state)
-            await self._session.commit()
+            await self._session.flush()
 
     async def delete_by_user(self, user_id: int) -> None:
         _logger.debug("删除用户 %d 的所有已读状态", user_id)
         await self._session.execute(
             delete(ReadState).where(ReadState.user_id == user_id)
         )
-        await self._session.commit()
+        await self._session.flush()
 
     async def prune_by_entry(self, entry_id: int) -> None:
         _logger.debug("清理条目 %d 的无时间戳已读状态", entry_id)
@@ -139,7 +135,7 @@ class ReadStateRepository:
                 ReadState.entry_id == entry_id, ReadState.timestamp.is_(None)
             )
         )
-        await self._session.commit()
+        await self._session.flush()
 
     async def prune_by_subscription(self, user_id: int, feed_id: int) -> None:
         _logger.debug("清理订阅 %d/%d 的无时间戳已读状态", user_id, feed_id)
@@ -152,7 +148,7 @@ class ReadStateRepository:
                     ReadState.timestamp.is_(None),
                 )
             )
-        await self._session.commit()
+        await self._session.flush()
 
     async def read_count(self, entry_id: int) -> int:
         _logger.debug("查询条目 %d 的已读计数", entry_id)

@@ -274,7 +274,7 @@
 
 `POST /reader/api/0/subscription/import`
 
-接收 OPML XML body，解析并导入订阅源和文件夹。文件夹不存在时自动创建。
+接收 OPML XML body，解析并导入订阅源和文件夹。文件夹不存在时自动创建。**单个源导入失败只跳过它自己**（其余照常导入），响应仍是 `OK`。
 
 ---
 

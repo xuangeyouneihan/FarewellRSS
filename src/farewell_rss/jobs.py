@@ -6,6 +6,9 @@
 两者共同的前提：**不能复用请求作用域的 service**。请求结束时 `get_session`
 会提交并关闭那个 session，而 AsyncSession 不允许被两个任务并发使用——
 后台任务和请求收尾会互相踩踏（这是拿请求 session 去 create_task 的隐患）。
+
+**提交也由这里负责**：repository 只 flush、不 commit，所以自建 session 的地方必须
+自己 commit，否则 `async with` 退出时静默回滚（不报错，日志还会说“完成”）。
 """
 
 import logging
@@ -30,4 +33,7 @@ async def hard_delete_user(user_id: int) -> None:
             _logger.warning("要清理的用户 %d 不存在，跳过", user_id)
             return
         await services.user.purge(user)
+        # 这条后台作业自己的事务边界，不能省：session 关闭时静默回滚，
+        # 不报错、日志还会打“清理完成”
+        await session.commit()
     _logger.info("用户 %d 的数据清理完成", user_id)

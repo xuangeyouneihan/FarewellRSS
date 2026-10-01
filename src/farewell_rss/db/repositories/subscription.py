@@ -80,7 +80,7 @@ class SubscriptionRepository:
                 folder_id=folder_id,
             )
             self._session.add(subscription)
-        await self._session.commit()
+        await self._session.flush()
         return subscription
 
     async def clear_folder(self, folder_id: int) -> None:
@@ -90,19 +90,19 @@ class SubscriptionRepository:
             .where(Subscription.folder_id == folder_id)
             .values(folder_id=None)
         )
-        await self._session.commit()
+        await self._session.flush()
 
     async def delete(self, subscription: Subscription) -> None:
         _logger.debug("删除订阅 %d/%d", subscription.user_id, subscription.feed_id)
         await self._session.delete(subscription)
-        await self._session.commit()
+        await self._session.flush()
 
     async def delete_by_user(self, user_id: int) -> None:
         _logger.debug("删除用户 %d 的所有订阅", user_id)
         await self._session.execute(
             delete(Subscription).where(Subscription.user_id == user_id)
         )
-        await self._session.commit()
+        await self._session.flush()
 
     async def subscription_count(self, feed_id: int) -> int:
         _logger.debug("查询订阅源 %d 的订阅人数", feed_id)
@@ -157,5 +157,5 @@ class SubscriptionRepository:
         if count:
             _logger.info("清理 %d 条指向已不存在源的订阅", count)
         await self._session.execute(delete(Subscription).where(orphan))
-        await self._session.commit()
+        await self._session.flush()
         return count or 0

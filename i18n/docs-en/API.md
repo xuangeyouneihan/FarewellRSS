@@ -274,7 +274,7 @@ Returns OPML XML, grouped by folder.
 
 `POST /reader/api/0/subscription/import`
 
-Accepts an OPML XML body, parses it, and imports feeds and folders. Folders are created automatically if they do not exist.
+Accepts OPML XML body, parses it, and imports feeds and folders. Folders are created automatically if they do not exist. **A feed that fails to import is skipped** (the rest are still imported); the response is `OK` either way.
 
 ---
 

@@ -13,9 +13,11 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import jobs
 from ..api.deps import get_current_user, get_user_service
+from ..db.db import get_session
 from ..db.models import User
 from ..services.exceptions import (
     InvalidInviteCodeError,
@@ -274,6 +276,7 @@ async def _verify_operator(
 
 @router.post("/accounts/DeleteAccount", status_code=status.HTTP_200_OK)
 async def delete_account(
+    session: Annotated[AsyncSession, Depends(get_session)],
     user_service: Annotated[UserService, Depends(get_user_service)],
     username: Annotated[str, Form()],
     operator_username: Annotated[str, Form()],
@@ -311,6 +314,9 @@ async def delete_account(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": type(e).__name__, "detail": str(e)},
         )
+    # repository 只 flush，所以这次显式提交不能省：后台作业自建 session，
+    # 看不见本请求尚未提交的软删除（目标用户会被当成“没被删”而继续跑）
+    await session.commit()
     # 软删除已生效（认证立即失效），数据清理是独立作业、自建 session 在后台跑
     _spawn_background(jobs.hard_delete_user(target.id))
     return Response("OK", media_type="text/plain")

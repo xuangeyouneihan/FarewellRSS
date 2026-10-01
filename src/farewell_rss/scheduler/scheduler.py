@@ -78,6 +78,10 @@ async def _update_all_feeds() -> None:
                         _logger.debug("订阅源（%d）已不存在，跳过更新", feed_id)
                         return
                     await services.feed.update(feed)
+                    # 这个源自己一个事务：源元数据 + 条目 + 附件要么全落库、要么全不落。
+                    # repository 只 flush，所以 commit 必须在这里——少了它，session
+                    # 关闭时静默回滚，而源已经被标成“刚抓过”，TTL 内不会再抓。
+                    await session.commit()
             except Exception:
                 _logger.exception("更新订阅源 %s（%d）时发生错误", title, feed_id)
 
@@ -150,6 +154,8 @@ async def run() -> None:
                 # 孤儿源 —— 两者都是「用扫描表达状态」的幂等清理
                 await services.subscription.prune_orphan_subscriptions()
                 await prune_orphan_feeds(services)
+                # 清理块自己的事务边界（repository 只 flush）
+                await session.commit()
         except Exception:
             _logger.exception("清理孤儿源时出错，跳过这一轮")
         await asyncio.sleep(_REFRESH_INTERVAL)

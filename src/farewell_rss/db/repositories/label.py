@@ -57,7 +57,7 @@ class LabelRepository:
     async def create(self, user_id: int, name: str, type_: LabelType) -> Label:
         label = Label(user_id=user_id, name=name, type=type_)
         self._session.add(label)
-        await self._session.commit()
+        await self._session.flush()
         _logger.debug("创建标签 %d，名称: %s，类型: %s", label.id, name, type_.value)
         return label
 
@@ -66,16 +66,16 @@ class LabelRepository:
         if existing and existing.id != label.id:
             return None
         label.name = new_name
-        await self._session.commit()
+        await self._session.flush()
         _logger.debug("更新标签 %d，新名称: %s", label.id, new_name)
         return label
 
     async def delete(self, label: Label) -> None:
         _logger.debug("删除标签 %d", label.id)
         await self._session.delete(label)
-        await self._session.commit()
+        await self._session.flush()
 
     async def delete_by_user(self, user_id: int) -> None:
         _logger.debug("删除用户 %d 的所有标签", user_id)
         await self._session.execute(delete(Label).where(Label.user_id == user_id))
-        await self._session.commit()
+        await self._session.flush()

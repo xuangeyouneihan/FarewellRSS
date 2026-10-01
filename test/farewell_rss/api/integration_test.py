@@ -126,9 +126,16 @@ async def client(monkeypatch):
     # 无法登录）；作业本身的清理逻辑由 jobs_test.py 覆盖。
     monkeypatch.setattr("farewell_rss.jobs.hard_delete_user", AsyncMock())
 
+    # 把应用的 session 工厂换到测试引擎（否则 get_session 会去连真实数据目录）
+    monkeypatch.setattr("farewell_rss.db.db.SessionLocal", TestSession)
+
+    # 依赖覆写保留着，但**实现直接复用生产的 get_session**：事务边界（提交／回滚）
+    # 由生产代码执行，测试不会因为覆写漏了提交而静默漂移——repository 改成只 flush
+    # 之后，「请求结束提交」这件事只在这一个地方发生，测试必须走同一条路径。
+    # 另外下面几处用例要靠它拿一个 session 来种数据／断言。
     async def _override_get_session():
-        async with TestSession() as s:
-            yield s
+        async for session in get_session():
+            yield session
 
     app.dependency_overrides[get_session] = _override_get_session
 
@@ -360,6 +367,49 @@ async def test_import_standard_opml(client: AsyncClient):
     assert subscriptions[0]["categories"] == [
         {"id": "user/-/label/Technology", "label": "Technology"}
     ]
+
+
+async def test_import_opml_skips_broken_feed(client: AsyncClient):
+    """OPML 里某个源抓不动：跳过它，其余照常导入（不要整份回滚）
+
+    请求级事务是整批提交的（repository 只 flush），“一个坏 URL 带走整份导入”
+    是很容易踩的写法——这条测试钉住那件事：坏源在中间，两边的好源都必须在。
+    """
+    headers = await _register(client, "opml-skip-user")
+    opml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <body>
+    <outline type="rss" text="Good one" xmlUrl="https://example.com/good-1.xml" />
+    <outline type="rss" text="Broken" xmlUrl="https://example.com/broken.xml" />
+    <outline type="rss" text="Good two" xmlUrl="https://example.com/good-2.xml" />
+  </body>
+</opml>"""
+
+    from farewell_rss.feed_fetcher.feed_fetcher import FetchedFeed
+
+    async def _flaky_fetch(url, etag=None, modified=None):
+        if "broken" in url:
+            raise RuntimeError("抓不到这个源")
+        # 每个 URL 给一个独立的源：_fake_fetch 固定返回 TEST_FEED，
+        # 那样两个好源会落成同一行 feed（订阅只剩一条），就测不出「两个都在」
+        return FetchedFeed(
+            href=url,
+            title=url,
+            fetched=TEST_FEED.fetched,
+            entries=list(TEST_FEED.entries),
+        )
+
+    with patch("farewell_rss.services.feed.fetch", side_effect=_flaky_fetch):
+        r = await client.post(
+            f"{BASE}/subscription/import",
+            content=opml,
+            headers={**headers, "Content-Type": "text/xml"},
+        )
+    assert r.status_code == 200, r.text
+
+    r = await client.get(f"{BASE}/subscription/list", headers=headers)
+    titles = sorted(s["title"] for s in r.json()["subscriptions"])
+    assert titles == ["Good one", "Good two"], titles
 
 
 async def test_export_opml_filename_uses_username(client: AsyncClient):
