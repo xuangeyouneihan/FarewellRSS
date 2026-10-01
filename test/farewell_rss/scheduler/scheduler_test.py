@@ -1,14 +1,21 @@
-"""调度器的孤儿源清理测试"""
+"""调度器测试：并发更新的 session 隔离 + 孤儿源清理"""
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 
+import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from farewell_rss.db.models import Base, Entry, Feed, ReadState, Subscription, User
 from farewell_rss.factory import build_services
+from farewell_rss.feed_fetcher.feed_fetcher import FetchedEntry, FetchedFeed
+from farewell_rss.scheduler import scheduler
 from farewell_rss.scheduler.scheduler import prune_orphan_feeds
+from farewell_rss.services import feed as feed_service_module
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -141,3 +148,158 @@ async def test_prune_survives_one_bad_feed(session, monkeypatch):
     assert await prune_orphan_feeds(services) == [good.id]
     assert await session.scalar(select(Feed).where(Feed.id == good.id)) is None
     assert await session.scalar(select(Feed).where(Feed.id == bad.id)) is not None
+
+
+# ─── 并发更新：每个任务一个 session（2026-10-01）────────────────────────
+
+_FEEDS = 12  # 源数要大于并发上限，才能造出「同时在抓」的局面
+_CONCURRENCY = 3  # 正测试用的并发上限（小于源数就够）
+_FETCHED = datetime(2024, 1, 1, tzinfo=UTC)  # 假抓取返回的时刻 = 「刷新过」的标记
+
+
+@pytest_asyncio.fixture
+async def file_session_factory(tmp_path):
+    """文件库 + session 工厂
+
+    并发这块必须用文件库：内存库走 StaticPool（所有 session 共用同一条连接），而这里
+    要验证的恰恰是「每个任务各自拿一条连接」；文件库才是生产的形态（QueuePool）。
+    """
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'concurrency.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
+
+def _fake_fetch(delay: float = 0.01):
+    """假抓取：先睡一下（让并发真的重叠），再返回一个带一条条目的源"""
+
+    async def _fetch(url, etag=None, modified=None):
+        await asyncio.sleep(delay)
+        return FetchedFeed(
+            href=url,
+            title=url,
+            fetched=_FETCHED,
+            entries=[FetchedEntry(guid=f"{url}#1", title="新条目")],
+        )
+
+    return _fetch
+
+
+async def _seed_subscribed_feeds(session_factory, count: int) -> None:
+    """一个用户 + count 个「有订阅者、且已过 TTL」的源"""
+    async with session_factory() as session:
+        user = User(username="u", password_hash="h")
+        session.add(user)
+        await session.flush()
+        for i in range(count):
+            feed = Feed(
+                href=f"https://example.com/{i}.xml", title=f"f{i}", fetched=_EPOCH
+            )
+            session.add(feed)
+            await session.flush()
+            session.add(Subscription(user_id=user.id, feed_id=feed.id))
+        await session.commit()
+
+
+async def _written(session_factory) -> tuple[int, int]:
+    """(写进库的条目数, fetched 被刷新过的源数)"""
+    async with session_factory() as session:
+        entries = await session.scalar(select(func.count()).select_from(Entry)) or 0
+        feeds = list((await session.scalars(select(Feed))).all())
+    return entries, sum(1 for feed in feeds if feed.fetched == _FETCHED)
+
+
+async def test_update_all_feeds_writes_every_feed(
+    file_session_factory, monkeypatch, caplog
+):
+    """并发更新时，每个源都要真的写进库
+
+    每个任务各开各的 session：旧写法（run() 只建一个 session 传进来）实测 12 个源
+    会有 11 条 `Session is already flushing`、条目只写进 10/12、时间戳只更新 1/12，
+    而且全被 per-feed 的 except 吞成日志（静默降级：时间戳没更新 → 每轮重复抓）。
+    """
+    await _seed_subscribed_feeds(file_session_factory, _FEEDS)
+    monkeypatch.setattr(scheduler, "SessionLocal", file_session_factory)
+    monkeypatch.setattr(scheduler, "_MAX_CONCURRENCY", _CONCURRENCY)
+    monkeypatch.setattr(feed_service_module, "fetch", _fake_fetch())
+    caplog.set_level(logging.ERROR, logger="farewell_rss.scheduler.scheduler")
+
+    await scheduler._update_all_feeds()
+
+    entries, refreshed = await _written(file_session_factory)
+    assert entries == _FEEDS, "有条目没写进库"
+    assert refreshed == _FEEDS, "有源的 fetched 没被刷新（下一轮会重复抓）"
+    assert [r.getMessage() for r in caplog.records] == []
+
+
+@pytest.mark.filterwarnings("ignore::sqlalchemy.exc.SAWarning")
+async def test_shared_session_does_lose_writes(
+    file_session_factory, monkeypatch, caplog
+):
+    """否定对照：故意让所有任务共用一个 session（也就是修之前的写法），必须看出丢更新
+
+    这条不是测修好的代码，而是证明上面那条断言有区分度 —— 否则它可能永远绿。
+    并发上限拉满（12 个源同时起）照抄当时实测出问题的那组参数。
+    """
+    await _seed_subscribed_feeds(file_session_factory, _FEEDS)
+    monkeypatch.setattr(scheduler, "_MAX_CONCURRENCY", _FEEDS)
+    monkeypatch.setattr(feed_service_module, "fetch", _fake_fetch())
+    caplog.set_level(logging.ERROR, logger="farewell_rss.scheduler.scheduler")
+
+    shared = file_session_factory()
+
+    @asynccontextmanager
+    async def _shared_factory():
+        yield shared  # 不新建也不关：所有任务共用同一个 session
+
+    monkeypatch.setattr(scheduler, "SessionLocal", _shared_factory)
+    try:
+        await scheduler._update_all_feeds()
+        entries, refreshed = await _written(file_session_factory)
+    finally:
+        await shared.close()
+
+    assert entries < _FEEDS or refreshed < _FEEDS, (
+        "共用一个 session 竟然全都写进去了？那正测试证明不了什么"
+    )
+
+
+async def test_run_survives_a_bad_cycle(file_session_factory, monkeypatch, caplog):
+    """单轮出错不能让调度任务退出（这个任务没人重启）
+
+    `main.py` 用 `create_task(scheduler_run())` 起的它，异常跑出 while True 就再也
+    没人叫醒，之后整个实例既不刷新也不清理。所以刷新和清理各自要包一层。
+    """
+    monkeypatch.setattr(scheduler, "SessionLocal", file_session_factory)
+    monkeypatch.setattr(scheduler, "_REFRESH_INTERVAL", 0)
+    caplog.set_level(logging.ERROR, logger="farewell_rss.scheduler.scheduler")
+    cycles: list[str] = []
+
+    async def bad_update() -> None:
+        cycles.append("update")
+        raise RuntimeError("boom")
+
+    async def fake_cleanup(services) -> list[int]:
+        cycles.append("cleanup")
+        return []
+
+    monkeypatch.setattr(scheduler, "_update_all_feeds", bad_update)
+    monkeypatch.setattr(scheduler, "prune_orphan_feeds", fake_cleanup)
+
+    task = asyncio.create_task(scheduler.run())
+    try:
+        for _ in range(1000):
+            if len(cycles) >= 4:  # 至少跑满两轮
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("run() 两轮都没跑到，是不是卡住了")
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    assert cycles.count("update") >= 2, "第一轮抛异常后 while True 就退出了"
+    assert cycles.count("cleanup") >= 1, "刷新出错不该连累清理"
+    assert any("刷新订阅源时出错" in r.getMessage() for r in caplog.records)

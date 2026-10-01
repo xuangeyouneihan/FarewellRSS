@@ -5,8 +5,6 @@ from datetime import UTC, datetime
 
 from ..db.db import SessionLocal
 from ..factory import ServiceBundle, build_services
-from ..services.feed import FeedService
-from ..services.subscription import SubscriptionService
 
 _logger = logging.getLogger(__name__)
 
@@ -18,50 +16,72 @@ _MAX_CONCURRENCY = int(
 )  # 最大并发数
 
 
-async def _update_all_feeds(
-    feed_service: FeedService, subscription_service: SubscriptionService
-) -> None:
+def _should_update(feed, subscription_counts: dict[int, int]) -> bool:
+    """这个源这一轮要不要抓：没人订阅、或者还在 TTL 内就不抓
+
+    纯只读判断，所以放在「开并发之前」那一段里串行做（订阅数还能一次批量查）。
     """
-    更新所有订阅源的内容。
+    if feed.id not in subscription_counts:
+        _logger.info(
+            "订阅源 %s（%d）没有订阅者，跳过更新", feed.title or feed.href, feed.id
+        )
+        return False
+    ttl = max(_MIN_TTL, feed.ttl) if feed.ttl is not None else _DEFAULT_TTL
+    if (
+        feed.fetched is not None
+        and (datetime.now(UTC) - feed.fetched).total_seconds() < ttl
+    ):
+        _logger.info(
+            "订阅源 %s（%d）在 TTL 内，跳过更新", feed.title or feed.href, feed.id
+        )
+        return False
+    return True
+
+
+async def _update_all_feeds() -> None:
+    """更新所有订阅源的内容
+
+    **每个并发任务自己开一个 session。** `AsyncSession` 不能被两个任务并发使用，而这里
+    最多有 `_MAX_CONCURRENCY` 个源同时在抓、最后都要写库（`upsert`）。旧写法是整个
+    `run()` 只建一个 session 传进来：实测 12 个源（并发上限 10）就会冒出 11 条
+    `Session is already flushing`，条目只写进 10/12、源的时间戳只更新 1/12 —— 而且会
+    被 per-feed 的 except 吞成一条日志（静默降级：时间戳没更新 → 每轮重复抓）。
+
+    分两阶段：先用一个 session **串行**挑出「要抓哪些源」（全是只读判断），再把
+    feed_id 交给并发任务 —— ORM 对象不跨 session 传递。
+
+    测试要换库，照 `jobs_test.py` 的做法 monkeypatch 本模块的 `SessionLocal`。
     """
     _logger.info("开始更新所有订阅源")
-    feeds = await feed_service.list_()
+    async with SessionLocal() as session:
+        services = build_services(session)
+        feeds = await services.feed.list_()
+        subscription_counts = await services.subscription.subscription_count_batch([
+            f.id for f in feeds
+        ])
+        todo = [
+            (feed.id, feed.title or feed.href)
+            for feed in feeds
+            if _should_update(feed, subscription_counts)
+        ]
+
     semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
 
-    subscription_counts = await subscription_service.subscription_count_batch([
-        f.id for f in feeds
-    ])
-
-    async def _update_one(feed):
-        if feed.id not in subscription_counts:
-            _logger.info(
-                "订阅源 %s（%d）没有订阅者，跳过更新",
-                feed.title or feed.href,
-                feed.id,
-            )
-            return
-        ttl = max(_MIN_TTL, feed.ttl) if feed.ttl is not None else _DEFAULT_TTL
-        if (
-            feed.fetched is not None
-            and (datetime.now(UTC) - feed.fetched).total_seconds() < ttl
-        ):
-            _logger.info(
-                "订阅源 %s（%d）在 TTL 内，跳过更新",
-                feed.title or feed.href,
-                feed.id,
-            )
-            return
+    async def _update_one(feed_id: int, title: str) -> None:
         async with semaphore:
             try:
-                await feed_service.update(feed)
+                async with SessionLocal() as session:
+                    services = build_services(session)
+                    feed = await services.feed.get(feed_id)
+                    if feed is None:
+                        # 挑完之后到抓之前被删掉了（退订 + 清理跑在了中间），跳过
+                        _logger.debug("订阅源（%d）已不存在，跳过更新", feed_id)
+                        return
+                    await services.feed.update(feed)
             except Exception:
-                _logger.exception(
-                    "更新订阅源 %s（%d）时发生错误",
-                    feed.title or feed.href,
-                    feed.id,
-                )
+                _logger.exception("更新订阅源 %s（%d）时发生错误", title, feed_id)
 
-    await asyncio.gather(*[_update_one(f) for f in feeds])
+    await asyncio.gather(*[_update_one(feed_id, title) for feed_id, title in todo])
     _logger.info("完成更新所有订阅源")
 
 
@@ -115,15 +135,21 @@ async def run() -> None:
         _MIN_TTL,
     )
     while True:
-        async with SessionLocal() as session:
-            services = build_services(session)
-            await _update_all_feeds(services.feed, services.subscription)
+        try:
+            await _update_all_feeds()
+        except Exception:
+            # 单轮出错不能让 while True 退出：main.py 用 create_task 起这个任务，
+            # 异常跑出去就再也没人重启，之后整个实例既不刷新也不清理
+            _logger.exception("刷新订阅源时出错，跳过这一轮")
         # 清理单独开一个 session：抓取和清理是两件独立的事，
         # 不共享事务也就不存在"抓取失败连累清理"的情况
-        async with SessionLocal() as session:
-            services = build_services(session)
-            # 先扫掉指向已不存在源的订阅（正常不该有，见那个方法的注释），再清理
-            # 孤儿源 —— 两者都是「用扫描表达状态」的幂等清理
-            await services.subscription.prune_orphan_subscriptions()
-            await prune_orphan_feeds(services)
+        try:
+            async with SessionLocal() as session:
+                services = build_services(session)
+                # 先扫掉指向已不存在源的订阅（正常不该有，见那个方法的注释），再清理
+                # 孤儿源 —— 两者都是「用扫描表达状态」的幂等清理
+                await services.subscription.prune_orphan_subscriptions()
+                await prune_orphan_feeds(services)
+        except Exception:
+            _logger.exception("清理孤儿源时出错，跳过这一轮")
         await asyncio.sleep(_REFRESH_INTERVAL)
