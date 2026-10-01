@@ -26,8 +26,11 @@ COPY --from=frontend /build/frontend/dist ./frontend/dist
 
 # 本地模式使用源码；发布模式安装 workflow 传入的 wheel。
 # 发布 workflow 会将 uv build 生成的 wheel 下载到构建上下文的 dist/。
+# 发布模式只取「最新的那个」wheel：dist/ 里若留着旧版本的 wheel，阶段 3 那句
+# farewell_rss-*.whl 会一次装上两个版本，pip 直接 ResolutionImpossible
+# （实测 0.1.10.dev14 + 8 月的 0.1.6 就是这个错）。
 RUN if [ "$RELEASE" = "true" ]; then \
-    mkdir -p /wheels && cp dist/*.whl /wheels/; \
+    mkdir -p /wheels && cp "$(ls -t dist/*.whl | head -1)" /wheels/; \
     else \
     apt-get update && apt-get install -y --no-install-recommends git; \
     pip wheel . --no-deps --wheel-dir /wheels; \
