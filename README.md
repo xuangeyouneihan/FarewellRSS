@@ -84,6 +84,10 @@ docker run -d -p 3000:3000 -v farewell-rss-data:/data farewell-rss
 
 或 `docker compose up -d`。镜像内默认 `FAREWELL_RSS_DATA_DIR=/data`（挂卷持久化），其余配置用环境变量覆盖（见上文）。打开 `http://localhost:3000`。
 
+> **Windows：不想装 Docker Desktop 的话**，WSL 3 自带的容器 CLI `wslc`（`wsl --version` 要是 3.x）能直接跑这个 Dockerfile，已实测构建/运行/前端+API 都正常：
+> `wslc build -t farewell-rss .`，然后 `wslc run -d --name farewell-rss -p 3000:3000 -v farewell-data:/data farewell-rss`。
+> 三点注意：它没有 compose（`docker-compose.yml` 里的 build/ports/volumes 就是上面这两件事）；构建同样要能访问 `docker.io`（网络抽风时重试一次即可）；`run -d` 之后等几秒再访问——立刻探测会碰到一次 connection reset。
+
 ### PyPI
 
 使用 uv 安装为长期可用的命令（推荐）：

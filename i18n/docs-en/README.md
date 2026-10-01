@@ -84,6 +84,9 @@ docker run -d -p 3000:3000 -v farewell-rss-data:/data farewell-rss
 
 Or `docker compose up -d`. The image defaults to `FAREWELL_RSS_DATA_DIR=/data` (persisted via volume mount); override the other settings with environment variables (see above). Open `http://localhost:3000`.
 
+> **On Windows, if you would rather not install Docker Desktop**, the container CLI `wslc` shipped with WSL 3 (`wsl --version` must be 3.x) runs this Dockerfile as-is — build/run/frontend+API verified: `wslc build -t farewell-rss .`, then `wslc run -d --name farewell-rss -p 3000:3000 -v farewell-data:/data farewell-rss`.
+> Three notes: there is no compose (the build/ports/volumes in `docker-compose.yml` are exactly the two commands above); the build still needs `docker.io` access (retry once if the network hiccups); and wait a few seconds after `run -d` — an immediate probe hits one connection reset.
+
 ### PyPI
 
 Install the command for persistent use with uv (recommended):
