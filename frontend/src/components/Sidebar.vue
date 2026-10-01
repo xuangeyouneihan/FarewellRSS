@@ -5,6 +5,7 @@ import {
   NDropdown,
   NInput,
   NModal,
+  NScrollbar,
   NSelect,
   useDialog,
   useMessage,
@@ -305,14 +306,15 @@ function subMenu() {
 
 <template>
   <aside class="sidebar">
-    <input
-      ref="opmlInput"
-      class="opml-input"
-      type="file"
-      accept=".opml,.xml,.txt"
-      @change="onOpmlSelected"
-    />
-    <nav>
+    <n-scrollbar class="sidebar-scroll" content-style="padding: 8px">
+      <input
+        ref="opmlInput"
+        class="opml-input"
+        type="file"
+        accept=".opml,.xml,.txt"
+        @change="onOpmlSelected"
+      />
+      <nav>
       <ul class="menu">
         <li v-for="s in systemStreams" :key="s.id">
           <a :class="{ active: isActive(s.id) }" @click="openStream(s.id, s.type)">
@@ -451,8 +453,9 @@ function subMenu() {
         </li>
       </ul>
     </nav>
+    </n-scrollbar>
 
-    <n-modal v-model:show="showAddModal" preset="card" :title="t('addSubscription')" style="width: 360px">
+    <n-modal v-model:show="showAddModal" preset="card" content-scrollable :title="t('addSubscription')" style="width: 360px">
       <n-input
         v-model:value="feedUrl"
         :placeholder="t('feedUrlPlaceholder')"
@@ -468,7 +471,7 @@ function subMenu() {
       @update:show="createModalShow = $event"
     />
 
-    <n-modal v-model:show="showRenameModal" preset="card" :title="t('rename')" style="width: 320px">
+    <n-modal v-model:show="showRenameModal" preset="card" content-scrollable :title="t('rename')" style="width: 320px">
       <n-input
         v-model:value="renameValue"
         :placeholder="t('newName')"
@@ -479,7 +482,7 @@ function subMenu() {
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showMoveModal" preset="card" :title="t('editCategory')" style="width: 320px">
+    <n-modal v-model:show="showMoveModal" preset="card" content-scrollable :title="t('editCategory')" style="width: 320px">
       <n-select
         v-model:value="moveValue"
         v-model:show="moveSelectShow"
@@ -500,9 +503,18 @@ function subMenu() {
 .sidebar {
   width: 200px;
   flex-shrink: 0;
-  overflow-y: auto;
+  /* 滚动交给内部的 NScrollbar；这里只负责给出确定高度。
+     min-height: 0 必须有：去掉 overflow 之后，flex 项的自动最小尺寸从 0 变回
+     min-content，不写这行在手机（竖向 flex）/ 抽屉里就不会收缩，内容直接被裁掉。 */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   border-right: 1px solid var(--app-border);
-  padding: 8px;
+}
+
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
 }
 
 .opml-input {
@@ -514,6 +526,11 @@ function subMenu() {
   .sidebar {
     width: 100%;
     border-right: none;
+    /* 这两种布局里侧栏是**竖向** flex 项，得放开收缩：
+       桌面那行的 flex-shrink: 0 本意是不压缩宽度，竖向时却让侧栏拒绝变矮，
+       内容会被 overflow: hidden 的容器裁掉（实测抽屉/手机上侧栏高度 1086px 不收缩）。 */
+    flex-shrink: 1;
+    height: 100%;
   }
 }
 

@@ -52,7 +52,7 @@ defineExpose({ open });
 </script>
 
 <template>
-  <n-modal v-model:show="show" preset="card" :title="title" style="width: 320px">
+  <n-modal v-model:show="show" preset="card" content-scrollable :title="title" style="width: 320px">
     <n-input
       v-model:value="name"
       :placeholder="placeholder"

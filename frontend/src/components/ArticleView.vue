@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import DOMPurify from "dompurify";
-import { NButton, NSelect, useMessage } from "naive-ui";
+import { NButton, NScrollbar, NSelect, useMessage } from "naive-ui";
 import { useStreamStore } from "@/stores/stream";
 import { useSubscriptionsStore } from "@/stores/subscriptions";
 import {
@@ -126,6 +126,12 @@ async function onTagChange(value: string): Promise<void> {
 
 <template>
   <article class="article-view" :class="{ compact }">
+    <!-- x-scrollable：正文里可能有宽表格/图，以前靠 overflow-y:auto 隐式获得的横向滚动要保留 -->
+    <n-scrollbar
+      class="article-scroll"
+      x-scrollable
+      :content-style="compact ? 'padding: 12px 16px' : 'padding: 24px'"
+    >
     <template v-if="currentItem">
       <button v-if="showBack" class="view-back-btn" @click="emit('back')">‹ {{ t("back") }}</button>
       <header class="article-header">
@@ -211,6 +217,7 @@ async function onTagChange(value: string): Promise<void> {
       </div>
     </template>
     <p v-else class="placeholder">{{ t("selectToRead") }}</p>
+    </n-scrollbar>
 
     <CreateLabelModal ref="createModalRef" />
   </article>
@@ -219,13 +226,17 @@ async function onTagChange(value: string): Promise<void> {
 <style scoped>
 .article-view {
   flex: 1;
-  overflow-y: auto;
-  padding: 24px;
+  /* 滚动交给内部的 NScrollbar；min-width/min-height 必须有：
+     去掉 overflow 后 flex 项的自动最小尺寸变回 min-content，宽表会把布局撑破 */
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 
-/* 手机：减小内边距 */
-.article-view.compact {
-  padding: 12px 16px;
+.article-scroll {
+  flex: 1;
+  min-height: 0;
 }
 
 .view-back-btn {

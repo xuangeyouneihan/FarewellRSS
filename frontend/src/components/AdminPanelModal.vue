@@ -166,7 +166,7 @@ defineExpose({ open });
 </script>
 
 <template>
-  <n-modal v-model:show="show" preset="card" :title="t('adminPanel')" style="width: 480px">
+  <n-modal v-model:show="show" preset="card" content-scrollable :title="t('adminPanel')" style="width: 480px">
     <p v-if="adminLoading" class="admin-tip">{{ t("loadingUsers") }}</p>
     <p v-else-if="!adminUsers.length" class="admin-tip">{{ t("noUsers") }}</p>
     <div v-for="u in adminUsers" :key="u.username" class="admin-user">
@@ -220,6 +220,7 @@ defineExpose({ open });
     <n-modal
       v-model:show="showCreateUser"
       preset="card"
+      content-scrollable
       :title="t('newUser')"
       style="width: 360px"
     >

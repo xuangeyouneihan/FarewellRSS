@@ -138,7 +138,7 @@ defineExpose({ open });
 </script>
 
 <template>
-  <n-modal v-model:show="show" preset="card" :title="t('profile')" style="width: 420px">
+  <n-modal v-model:show="show" preset="card" content-scrollable :title="t('profile')" style="width: 420px">
     <div class="profile">
       <div class="username nickname-row">
         <template v-if="!editingName">

@@ -66,47 +66,23 @@ watchEffect(() => {
   flex-direction: column;
 }
 
-/* 内容区可滚动；header 与 action（footer）自然收缩固定在上下 */
-.n-card.n-modal > .n-card-content {
-  overflow-y: auto;
-  flex: 1 1 auto;
-  min-height: 0;
+/* 弹窗封顶 85vh：header 固定，剩下的高度给内容区。
+   内容区滚动由 content-scrollable 负责——Naive UI 会在 header 与内容之间插一个
+   NScrollbar（.n-card__content-scrollbar，带 overflow: hidden），它作为 flex 项
+   会自动收缩、正好吃掉剩余高度。所以这里只需要「确定高度 + 纵向 flex」两件事，
+   不需要再给 .n-card-content 设 overflow/高度（实测它现在是个内层普通 div）。 */
+.n-card.n-modal {
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
 }
 
-.n-card.n-modal > .n-card-header,
-.n-card.n-modal > .n-card__action {
+/* footer 里的按钮别被压扁；header 由 Naive UI 自己设了 flex: 0 0 auto。
+   注：实测 footer 的类名是 .n-card__footer（不是 .n-card__action）。 */
+.n-card.n-modal > .n-card__footer {
   flex-shrink: 0;
 }
 
-/* 自定义滚动条（WebKit 系）。深色/浅色都用细滚动条 + 圆角半透明 thumb */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-
-::-webkit-scrollbar-thumb {
-  border-radius: 5px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-/* 浅色：浅灰 thumb，与白色轨道协调 */
-html[style*="color-scheme: light"] ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.12);
-}
-
-html[style*="color-scheme: light"] ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.24);
-}
-
-/* 深色：半透明白 */
-html[style*="color-scheme: dark"] ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.24);
-}
-
-html[style*="color-scheme: dark"] ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.36);
-}
+/* 全站滚动条已统一为 Naive UI 的 NScrollbar（5px 悬浮、跟随主题），
+   原先那套 ::-webkit-scrollbar 规则已删除——项目里已无原生滚动容器。 */
 </style>
