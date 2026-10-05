@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 应用图标（any / maskable / apple-touch 共用这一张）：
+       底铺满 512×512、不写 rx 圆角、不描边（圆角交给系统遮罩）。
+       scale=1.10 是上限附近的值 —— 墨迹最远半径 ≈193px，落在 maskable 的 80% 安全圈（≤205px）内。
+       改大它会让 maskable 版本在圆形/方形遮罩下被切，改小则图标显得太空。 -->
+  <defs>
+    <linearGradient id="arc-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2E90F0"/><stop offset="50%" stop-color="#1CA45F"/><stop offset="100%" stop-color="#45BE86"/>
+    </linearGradient>
+    <linearGradient id="fold-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2B76D0"/><stop offset="100%" stop-color="#174B93"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="#FFFFFF"/>
+  <g transform="translate(78.4, 81.7) scale(1.10)">
+    <circle cx="56" cy="256" r="32" fill="#3A8EF2"/>
+    <path d="M 56,152 A 104,104 0 0,1 160,256" fill="none" stroke="url(#arc-grad)" stroke-width="36" stroke-linecap="round"/>
+    <path d="M 56,48 A 208,208 0 0,1 264,256" fill="none" stroke="url(#arc-grad)" stroke-width="36" stroke-linecap="round"/>
+    <path d="M 230,40 L 300,110 L 210,130 Z" fill="#3A8EF2"/>
+    <path d="M 300,110 L 245,180 L 210,130 Z" fill="url(#fold-grad)"/>
+  </g>
+</svg>

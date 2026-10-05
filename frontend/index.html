@@ -2,7 +2,19 @@
 <html lang="">
   <head>
     <meta charset="UTF-8">
-    <link rel="icon" href="/favicon.ico">
+    <!-- 图标都用相对路径：项目是「一次构建、可部署到任意子路径」，绝对路径会指到站点根 -->
+    <link rel="icon" href="./favicon.ico">
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png">
+    <link rel="manifest" href="./manifest.json">
+    <!-- 浏览器界面色跟随深浅色；manifest 里的 theme_color 只能写一个，这里是更准的覆盖 -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f5f5">
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101014">
+    <!-- iOS：加到主屏后去掉浏览器界面（Android/Chrome 侧靠 manifest 的 display: standalone） -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="告别 RSS">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>告别 RSS</title>
     <!-- 实际标题由各视图按浏览器语言用 i18n 动态设置 -->

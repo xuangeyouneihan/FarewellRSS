@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 标签页图标：无底、墨迹约占画布 90%、按墨迹居中。
+       深色标签栏下只提亮一档（.dot/.wing-light/.wing-dark 三处，幅度 ~10%）。 -->
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .wing-light, .dot { fill: #4E9BF3; }
+      .wing-dark { fill: #3E7FCB; }
+    }
+  </style>
+  <defs>
+    <linearGradient id="arc-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2E90F0"/><stop offset="50%" stop-color="#1CA45F"/><stop offset="100%" stop-color="#45BE86"/>
+    </linearGradient>
+    <linearGradient id="fold-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2B76D0"/><stop offset="100%" stop-color="#174B93"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(-13.2, -8.2) scale(1.667)">
+    <circle class="dot" cx="56" cy="256" r="32" fill="#3A8EF2"/>
+    <path d="M 56,152 A 104,104 0 0,1 160,256" fill="none" stroke="url(#arc-grad)" stroke-width="36" stroke-linecap="round"/>
+    <path d="M 56,48 A 208,208 0 0,1 264,256" fill="none" stroke="url(#arc-grad)" stroke-width="36" stroke-linecap="round"/>
+    <path class="wing-light" d="M 230,40 L 300,110 L 210,130 Z" fill="#3A8EF2"/>
+    <path class="wing-dark" d="M 300,110 L 245,180 L 210,130 Z" fill="url(#fold-grad)"/>
+  </g>
+</svg>
