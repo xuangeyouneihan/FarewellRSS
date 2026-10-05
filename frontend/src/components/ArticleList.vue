@@ -5,10 +5,8 @@ import { useStreamStore, type SortOrder } from "@/stores/stream";
 import { isRead, type Item } from "@/types/greader";
 import { t, locale } from "@/i18n";
 
-const props = defineProps<{ showBack?: boolean; fullWidth?: boolean }>();
-const emit = defineEmits<{ (e: "back"): void }>();
+const props = defineProps<{ fullWidth?: boolean; streamName?: string | null }>();
 void props;
-void emit;
 
 const stream = useStreamStore();
 const message = useMessage();
@@ -164,7 +162,8 @@ defineExpose({ fillViewport });
 <template>
   <main class="article-list" :class="{ 'full-width': fullWidth }">
     <header class="list-header">
-      <button v-if="showBack" class="back-btn" @click="emit('back')">‹ {{ t("back") }}</button>
+      <!-- 手机/平板档：显示当前流名称（桌面档侧栏常驻、能看到高亮，所以不传这个 prop） -->
+      <span v-if="streamName" class="list-title" :title="streamName">{{ streamName }}</span>
       <button class="sort-btn" @click="toggleSort">
         {{ stream.sortOrder === "n" ? t("newestFirst") : t("oldestFirst") }}
       </button>
@@ -248,17 +247,19 @@ defineExpose({ fillViewport });
   flex-shrink: 0;
 }
 
-.back-btn {
-  border: none;
-  background: none;
-  color: var(--app-primary);
+.list-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 14px;
-  cursor: pointer;
-  padding: 4px 4px;
-  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--app-text-1);
 }
 
 .sort-btn {
+  flex-shrink: 0;
   border: 1px solid var(--app-border);
   background: var(--app-card);
   border-radius: 4px;

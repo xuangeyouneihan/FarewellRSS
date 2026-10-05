@@ -7,6 +7,7 @@ import { useStreamStore } from "@/stores/stream";
 import { useAuthStore } from "@/stores/auth";
 import { STATE, labelName } from "@/types/greader";
 import { useBreakpoint } from "@/responsive";
+import { useUrlState } from "@/urlState";
 import Sidebar from "@/components/Sidebar.vue";
 import ArticleList from "@/components/ArticleList.vue";
 import ArticleView from "@/components/ArticleView.vue";
@@ -21,10 +22,19 @@ const message = useMessage();
 const router = useRouter();
 const { isPhone, isTablet, isCompact } = useBreakpoint();
 
-// 手机逐级钻取：sidebar → list → article
-const phoneLevel = ref<"sidebar" | "list" | "article">("sidebar");
-// 平板：侧栏抽屉开关
+// 手机：list ⇄ article 两级钻取（订阅列表已收进左侧抽屉，与平板一致）
+const phoneLevel = ref<"list" | "article">("list");
+// 手机 / 平板：侧栏抽屉开关
 const sidebarDrawer = ref(false);
+// 状态 ⇄ URL：hash 层级 #/item/<hex> + query（stream / type / sidebar / modal）
+const {
+  applyFromUrl,
+  migrateLegacyQuery,
+  refineLabelType,
+  openModal,
+  profileShow,
+  adminShow,
+} = useUrlState({ sidebarDrawer, isCompact });
 
 // 监听文章打开/关闭，驱动手机钻取层级
 watch(
@@ -35,22 +45,27 @@ watch(
     else if (phoneLevel.value === "article") phoneLevel.value = "list";
   },
 );
-// 监听流切换：手机回到列表层，平板关抽屉
+// 切换流：关抽屉（手机/平板从抽屉里选了订阅源或分类；桌面下这个值本来就是 false）
 watch(
   () => stream.currentStreamId,
   () => {
-    if (isPhone.value && phoneLevel.value === "sidebar") phoneLevel.value = "list";
-    if (isTablet.value) sidebarDrawer.value = false;
+    sidebarDrawer.value = false;
   },
 );
 // 断点变化时复位手机层级
 watch(isPhone, (v) => {
-  if (v) phoneLevel.value = "sidebar";
+  if (v) phoneLevel.value = "list";
 });
 
+/** 从抽屉里选了订阅源 / 分类：关抽屉；手机上回到列表层 */
 function onSidebarNavigate(): void {
-  // 手机进入列表层；平板关抽屉（平板的 navigate 已在模板上绑了关抽屉，这里只处理手机）
+  sidebarDrawer.value = false;
   if (isPhone.value) phoneLevel.value = "list";
+}
+
+/** 打开侧栏抽屉（手机顶栏 ☰、手机列表页的「返回」） */
+function openSidebar(): void {
+  sidebarDrawer.value = true;
 }
 
 function phoneBackToList(): void {
@@ -58,21 +73,11 @@ function phoneBackToList(): void {
   phoneLevel.value = "list";
 }
 
-function phoneBackToSidebar(): void {
-  phoneLevel.value = "sidebar";
-}
-
 function onMenuBtn(): void {
-  if (isPhone.value) {
-    phoneBackToSidebar();
-  } else {
-    sidebarDrawer.value = true;
-  }
+  openSidebar();
 }
 
 const searchQuery = ref("");
-const profileModalRef = ref<{ open: () => void } | null>(null);
-const adminPanelRef = ref<{ open: () => void } | null>(null);
 const articleListRef = ref<{ fillViewport: () => Promise<void> } | null>(null);
 
 // 用户下拉菜单
@@ -85,9 +90,9 @@ const userMenuOptions = computed(() => {
 
 async function onUserMenuSelect(key: string): Promise<void> {
   if (key === "profile") {
-    profileModalRef.value?.open();
+    openModal("profile");
   } else if (key === "admin") {
-    adminPanelRef.value?.open();
+    openModal("admin");
   } else if (key === "logout") {
     auth.logout();
     await router.push({ name: "login" });
@@ -100,34 +105,40 @@ function unreadPrefix(id: string): string {
   return n > 0 ? `(${n}) ` : "";
 }
 
+/** 当前流的显示名 + 是否带未读数；「全部文章」没有名称段（name = null） */
+function resolveStream(id: string): { name: string | null; withUnread: boolean } {
+  if (id === STATE.readingList) return { name: null, withUnread: true };
+  if (id.startsWith("feed/")) {
+    return {
+      name:
+        subs.subscriptions.find((s) => s.id === id)?.title ?? t("subscriptions"),
+      withUnread: true,
+    };
+  }
+  if (id === STATE.starred) return { name: t("starred"), withUnread: false };
+  if (id === STATE.uncategorized) {
+    return { name: t("uncategorized"), withUnread: false };
+  }
+  if (id === STATE.history) return { name: t("history"), withUnread: false };
+  if (id.startsWith("user/-/label/")) {
+    // 收藏夹（type=tag）不带未读数；订阅分类（folder）带
+    return { name: labelName(id), withUnread: stream.currentType !== "tag" };
+  }
+  if (id.startsWith("user/-/search/")) {
+    return { name: t("search"), withUnread: false };
+  }
+  return { name: null, withUnread: true };
+}
+
+// 列表头里的当前流名称（手机/平板用；「全部文章」也要显示出来）
+const listTitle = computed(
+  () => resolveStream(stream.currentStreamId).name ?? t("allArticles"),
+);
+
 // 根据当前流设置页面标题
 watchEffect(() => {
   const id = stream.currentStreamId;
-  let name: string | null = null;
-  let withUnread = true;
-
-  if (id === STATE.readingList) {
-    name = null; // 全部文章：无名称段
-  } else if (id.startsWith("feed/")) {
-    name = subs.subscriptions.find((s) => s.id === id)?.title ?? t("subscriptions");
-  } else if (id === STATE.starred) {
-    name = t("starred");
-    withUnread = false;
-  } else if (id === STATE.uncategorized) {
-    name = t("uncategorized");
-    withUnread = false;
-  } else if (id === STATE.history) {
-    name = t("history");
-    withUnread = false;
-  } else if (id.startsWith("user/-/label/")) {
-    name = labelName(id);
-    // 收藏夹（type=tag）不带未读数；订阅分类（folder）带
-    withUnread = stream.currentType !== "tag";
-  } else if (id.startsWith("user/-/search/")) {
-    name = t("search");
-    withUnread = false;
-  }
-
+  const { name, withUnread } = resolveStream(id);
   // 拼接前缀（未读数 + 名称），前缀为空时连「 · 」一起去掉
   const unread = withUnread ? unreadPrefix(id).trim() : "";
   const prefix = [unread, name].filter(Boolean).join(" ");
@@ -138,7 +149,8 @@ onMounted(async () => {
   // 三个请求互不依赖，并行加载首屏
   const results = await Promise.allSettled([
     subs.refresh(),
-    stream.loadStream(STATE.readingList),
+    // 先把旧的 /?stream=…&item=… 链接搬进 hash，再按 URL 恢复
+    migrateLegacyQuery().then(applyFromUrl),
     auth.fetchUserInfo(),
   ]);
   const failed = results.find((r) => r.status === "rejected");
@@ -146,6 +158,8 @@ onMounted(async () => {
     const e = failed.reason;
     message.error(e instanceof Error ? e.message : t("loadFailed"));
   }
+  // URL 里 label 流没带 type 的（手写/外部链接），等订阅列表到位再补齐类型
+  await refineLabelType();
   // 首屏不足一屏时继续加载，直到出现滚动条或没有更多
   await nextTick();
   await articleListRef.value?.fillViewport();
@@ -165,7 +179,9 @@ function submitSearch(): void {
 
 <template>
   <div class="reader">
-    <header class="topbar">
+    <!-- 手机档：文章列表保留页面顶栏（品牌/搜索/用户菜单/☰，抽屉入口就是它），
+         只有进正文时才把顶栏收掉，把整屏高度留给阅读。 -->
+    <header v-if="!isPhone || phoneLevel === 'list'" class="topbar">
       <!-- 手机/平板：左上角抽屉按钮 -->
       <n-button
         v-if="isCompact"
@@ -173,7 +189,7 @@ function submitSearch(): void {
         class="menu-btn"
         @click="onMenuBtn"
       >
-        {{ isPhone && phoneLevel !== "sidebar" ? "‹" : "☰" }}
+        ☰
       </n-button>
       <span class="brand">{{ t("appName") }}</span>
       <n-input
@@ -186,6 +202,7 @@ function submitSearch(): void {
       />
       <n-dropdown
         trigger="click"
+        placement="bottom-end"
         :options="userMenuOptions"
         @select="(key: string | number) => onUserMenuSelect(String(key))"
       >
@@ -200,6 +217,13 @@ function submitSearch(): void {
       </n-dropdown>
     </header>
 
+    <!-- 手机 / 平板：订阅列表收进左侧抽屉（同一份，两档布局不会漂移） -->
+    <n-drawer v-if="isCompact" v-model:show="sidebarDrawer" placement="left" :width="280">
+      <n-drawer-content :body-content-style="{ padding: 0 }">
+        <Sidebar @navigate="onSidebarNavigate" />
+      </n-drawer-content>
+    </n-drawer>
+
     <!-- 桌面：三栏 -->
     <div v-if="!isCompact" class="reader-body">
       <Sidebar />
@@ -209,36 +233,26 @@ function submitSearch(): void {
       </div>
     </div>
 
-    <!-- 平板：抽屉侧栏 + 列表 + 正文 -->
-    <template v-else-if="isTablet">
-      <n-drawer v-model:show="sidebarDrawer" placement="left" :width="280">
-        <n-drawer-content :body-content-style="{ padding: 0 }">
-          <Sidebar @navigate="sidebarDrawer = false" />
-        </n-drawer-content>
-      </n-drawer>
-      <div class="reader-body">
-        <div class="columns">
-          <ArticleList ref="articleListRef" />
-          <ArticleView />
-        </div>
+    <!-- 平板：列表 + 正文（侧栏在抽屉里） -->
+    <div v-else-if="isTablet" class="reader-body">
+      <div class="columns">
+        <ArticleList ref="articleListRef" :stream-name="listTitle" />
+        <ArticleView />
       </div>
-    </template>
+    </div>
 
-    <!-- 手机：逐级钻取 -->
+    <!-- 手机：列表 ⇄ 正文 两级钻取（侧栏同上在抽屉里） -->
     <div v-else class="reader-body">
-      <div v-show="phoneLevel === 'sidebar'" class="phone-pane">
-        <Sidebar @navigate="onSidebarNavigate" />
-      </div>
       <div v-show="phoneLevel === 'list'" class="phone-pane">
-        <ArticleList ref="articleListRef" show-back full-width @back="phoneBackToSidebar" />
+        <ArticleList ref="articleListRef" full-width :stream-name="listTitle" />
       </div>
       <div v-show="phoneLevel === 'article'" class="phone-pane">
         <ArticleView show-back compact @back="phoneBackToList" />
       </div>
     </div>
 
-    <UserProfileModal ref="profileModalRef" />
-    <AdminPanelModal ref="adminPanelRef" />
+    <UserProfileModal v-model:show="profileShow" />
+    <AdminPanelModal v-model:show="adminShow" />
   </div>
 </template>
 
@@ -273,15 +287,46 @@ function submitSearch(): void {
   max-width: 40vw;
 }
 
-/* 手机/平板：搜索框退让左上角按钮 */
+/* 手机/平板：搜索框在品牌与头像之间居中，且不挤占它们 */
 @media (max-width: 1024px) {
   .search {
-    position: static;
+    /* 这里必须是 relative 而不是 static：.n-input__border / .n-input__state-border 都是
+       absolute 定位、以 .n-input 自身为包含块；写成 static 后包含块会落到 .topbar，
+       边框会被拉成整条顶栏那么大（实测平板下 900×50，而输入框只有 360×34）。 */
+    position: relative;
+    /* 桌面档的 left:50% 是配绝对定位用的；这里 position 变成 relative 后它依然生效，
+       会把搜索框整体右推半个顶栏（实测平板 x 从 103 变 541、还溢出 1px），必须一起清掉。 */
+    left: auto;
     transform: none;
-    flex: 1;
-    max-width: none;
+    /* 居中：只靠搜索框两侧的 auto 外边距等分剩余空间（不再用 flex:1 往左长）。
+       注意 .user-btn 在桌面档也带 margin-left:auto，三份 auto 会按 1:1:1 分，
+       左右就不等了（实测 87 : 172）——所以在下面把紧凑档的头像那份清掉。
+       360px 既是 flex 基准也是上限；窄屏时只有搜索框自己收缩（☰/品牌/头像都是 flex-shrink:0）。 */
+    flex: 0 1 360px;
+    width: 360px;
+    min-width: 0;
+    margin: 0 auto;
+  }
+
+  /* 紧凑档头像不再吃 auto margin（居中交给搜索框两侧）。
+     选择器必须带 .topbar：文件末尾的基础规则 `.user-btn{margin-left:auto}` 在后面，
+     同特异性下它赢，光写 .user-btn 压不住（实测头像仍在按 1:2 分摊）。 */
+  .topbar .user-btn {
+    margin-left: 0;
+  }
+}
+
+/* 窄屏没有余量可居中，而且固定 360 基准 + auto 边距会把搜索框压得很窄
+   （实测 480 时只剩 192px）、头像也不再靠右：这里改成「占满中间 + 头像回最右」。 */
+@media (max-width: 560px) {
+  .search {
+    flex: 1 1 auto; /* 0% 基准 → 直接吃掉中间剩余空间（上限仍是 360） */
+    max-width: 360px;
     margin: 0 8px;
-    width: auto;
+  }
+
+  .topbar .user-btn {
+    margin-left: auto;
   }
 }
 
@@ -289,6 +334,13 @@ function submitSearch(): void {
   font-size: 18px;
   flex-shrink: 0;
   margin-right: 4px;
+}
+
+/* n-button 的 text 按钮在 :focus 时会把颜色变主色；抽屉关闭时 naive-ui 会把焦点还给
+   触发它的这个按钮（此时 :focus-visible 为 false），于是它看起来「还亮着」，鼠标移开也不恢复。
+   改成只在键盘聚焦（:focus-visible）或 hover 时高亮：鼠标点完留下的 focus 不上色。 */
+.menu-btn:focus:not(:focus-visible):not(:hover) {
+  color: inherit;
 }
 
 .phone-pane {

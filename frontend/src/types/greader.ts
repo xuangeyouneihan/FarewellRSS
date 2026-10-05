@@ -12,12 +12,27 @@ export const STATE = {
   history: 'user/-/state/farewell-rss/history',
 } as const
 
+/** item id 前缀（后端 api/stream.py 生成、api/_common.py 解析都用这个形态） */
+export const TAG_ITEM_PREFIX = 'tag:google.com,2005:reader/item/'
+
 /** label/{name} 前缀 */
 export const LABEL_PREFIX = 'user/-/label/'
 
 /** 从 label ID 提取名称 */
 export function labelName(id: string): string {
   return id.startsWith(LABEL_PREFIX) ? id.slice(LABEL_PREFIX.length) : id
+}
+
+/** 从 item id（tag:...item/{hex}）取那截 hex；不符合该形态则原样返回 */
+export function entryHex(itemId: string): string {
+  return itemId.startsWith(TAG_ITEM_PREFIX)
+    ? itemId.slice(TAG_ITEM_PREFIX.length)
+    : itemId
+}
+
+/** 由 hex 还原完整 item id */
+export function entryTagId(hex: string): string {
+  return TAG_ITEM_PREFIX + hex
 }
 
 /** 从 item id（tag:...item/{hex}）解析出条目自增 id */

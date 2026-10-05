@@ -190,6 +190,18 @@ export const useStreamStore = defineStore('stream', () => {
     currentItemData.value = null
   }
 
+  /** 按 item id 打开：内存里没有就向后端要一条（URL 恢复 / 深链用） */
+  async function openItemById(itemId: string): Promise<void> {
+    const local = findItem(itemId)
+    if (local) {
+      openItem(local)
+      return
+    }
+    const data = await greader.getItemsContents([itemId])
+    const item = data.items[0]
+    if (item) openItem(item)
+  }
+
   /** 本地更新某条目的 categories（乐观更新），同步当前文章缓存 */
   function updateItemCategories(
     itemId: string,
@@ -319,6 +331,7 @@ export const useStreamStore = defineStore('stream', () => {
     currentItem,
     findItem,
     openItem,
+    openItemById,
     closeItem,
     markRead,
     toggleRead,

@@ -11,7 +11,8 @@ const auth = useAuthStore();
 const message = useMessage();
 const dialog = useDialog();
 
-const show = ref(false);
+// 受控：由 ReaderView 用 v-model:show 绑定，URL 参数是唯一真相
+const show = defineModel<boolean>("show", { default: false });
 
 const adminUsers = ref<UserEntry[]>([]);
 const adminLoading = ref(false);

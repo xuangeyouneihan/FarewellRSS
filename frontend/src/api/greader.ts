@@ -119,6 +119,23 @@ export async function register(
   setToken(parseAuthToken(await response.text()))
 }
 
+/** 按 item id 批量取条目（POST，重复字段 i）；用于按 URL 里的 id 直接恢复打开的文章 */
+export async function getItemsContents(
+  itemIds: string[],
+): Promise<StreamContents> {
+  const body = new URLSearchParams()
+  for (const id of itemIds) body.append('i', id)
+  const response = await request(`${READER_BASE}/stream/items/contents`, {
+    method: 'POST',
+    headers: {
+      ...authHeader(),
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  })
+  return response.json()
+}
+
 export async function getUserInfo(): Promise<UserInfo> {
   const response = await request(`${READER_BASE}/user-info`, {
     headers: authHeader(),

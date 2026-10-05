@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { NButton, NInput, NModal, useMessage } from "naive-ui";
 import { useAuthStore } from "@/stores/auth";
@@ -12,7 +12,8 @@ const auth = useAuthStore();
 const router = useRouter();
 const message = useMessage();
 
-const show = ref(false);
+// 受控：由 ReaderView 用 v-model:show 绑定，URL 参数是唯一真相
+const show = defineModel<boolean>("show", { default: false });
 
 // 修改密码
 const oldPassword = ref("");
@@ -67,14 +68,19 @@ const canDelete = computed(
     deletePassword.value.length > 0,
 );
 
-function open(): void {
-  show.value = true;
+// 打开时清空表单：URL 驱动的打开（前进/后退）也要清
+watch(show, (v) => {
+  if (!v) return;
   oldPassword.value = "";
   newPassword.value = "";
   confirmPassword.value = "";
   confirmUsername.value = "";
   deletePassword.value = "";
   editingName.value = false;
+});
+
+function open(): void {
+  show.value = true;
 }
 
 async function changePassword(): Promise<void> {
