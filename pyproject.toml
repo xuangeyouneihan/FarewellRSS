@@ -21,6 +21,8 @@ dependencies = [
 
 [project.scripts]
 farewell-rss = "farewell_rss:main"
+# 短别名，与 farewell-rss 完全等价（少敲几个键）
+fwrss = "farewell_rss:main"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

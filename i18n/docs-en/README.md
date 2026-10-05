@@ -57,6 +57,7 @@ To run from the local source tree:
 
 ```sh
 uv run farewell-rss                      # start backend and frontend with one command (port 3000 by default)
+uv run fwrss                             # short alias for the same command; `python -m farewell_rss` works too
 ```
 
 For frontend development with hot reload, use `cd frontend && pnpm dev` (port 5173, proxied to 3000).
@@ -93,14 +94,14 @@ Install the command for persistent use with uv (recommended):
 
 ```sh
 uv tool install farewell-rss
-farewell-rss
+farewell-rss        # or the short alias fwrss / python -m farewell_rss
 ```
 
 You can also install it into the current Python environment:
 
 ```sh
 pip install farewell-rss
-farewell-rss
+farewell-rss        # or the short alias fwrss / python -m farewell_rss
 ```
 
 ## Roadmap

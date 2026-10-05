@@ -64,7 +64,7 @@ OS 环境变量  >  数据目录下的 .env 文件
 ```powershell
 $env:FAREWELL_RSS_ALLOW_REGISTER = "false"          # 完全关闭自助注册
 $env:FAREWELL_RSS_PORT = "8080"
-farewell-rss
+farewell-rss                                       # 也可用短别名 fwrss / python -m farewell_rss
 ```
 
 ```powershell

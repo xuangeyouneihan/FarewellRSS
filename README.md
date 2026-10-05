@@ -57,6 +57,7 @@ uv build                                  # 构建 wheel 和源码包
 
 ```sh
 uv run farewell-rss                      # 一条命令同时起前后端（默认 3000 端口）
+uv run fwrss                             # 同一个命令的短别名；也可以 python -m farewell_rss
 ```
 
 前端开发热更新用 `cd frontend && pnpm dev`（5173 端口，代理到 3000）。
@@ -94,14 +95,14 @@ docker run -d -p 3000:3000 -v farewell-rss-data:/data farewell-rss
 
 ```sh
 uv tool install farewell-rss
-farewell-rss
+farewell-rss        # 或短别名 fwrss / python -m farewell_rss
 ```
 
 也可以安装到当前 Python 环境：
 
 ```sh
 pip install farewell-rss
-farewell-rss
+farewell-rss        # 或短别名 fwrss / python -m farewell_rss
 ```
 
 ## 画饼

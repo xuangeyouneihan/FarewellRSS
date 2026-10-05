@@ -64,7 +64,7 @@ OS environment variables  >  .env file in the data directory
 ```powershell
 $env:FAREWELL_RSS_ALLOW_REGISTER = "false"          # Completely disable self-service registration
 $env:FAREWELL_RSS_PORT = "8080"
-farewell-rss
+farewell-rss                                       # short alias fwrss / python -m farewell_rss also work
 ```
 
 ```powershell
