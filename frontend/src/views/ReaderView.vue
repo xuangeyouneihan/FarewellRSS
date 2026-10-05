@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch, watchEffect } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
 import { useRouter } from "vue-router";
 import { NAvatar, NButton, NDrawer, NDrawerContent, NDropdown, NInput, useMessage } from "naive-ui";
 import { useSubscriptionsStore } from "@/stores/subscriptions";
@@ -73,8 +73,41 @@ function phoneBackToList(): void {
   phoneLevel.value = "list";
 }
 
+const menuBtnRef = ref<InstanceType<typeof NButton> | null>(null);
+
+/** 最近一次输入是键盘吗？用来区分「用户自己聚焦」与「浮层关完把焦点还回来」。
+
+ 不拿 :focus-visible 当判据：实测在「抽屉关闭时还焦点」这条路径上，它时真时假
+ （似乎取决于此前是否敲过键盘），用它做判断会时灵时不灵。 */
+let lastInputWasKeyboard = false;
+function onKeyInput(): void {
+  lastInputWasKeyboard = true;
+}
+function onPointerInput(): void {
+  lastInputWasKeyboard = false;
+}
+onMounted(() => {
+  window.addEventListener("keydown", onKeyInput, true);
+  window.addEventListener("pointerdown", onPointerInput, true);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onKeyInput, true);
+  window.removeEventListener("pointerdown", onPointerInput, true);
+});
+
+/** 把 ☰ 上「不是键盘来的」焦点立刻移掉
+
+  触摸/鼠标点完会留下 :focus；抽屉关闭时 naive-ui 又会把焦点还给这个触发按钮（此时
+  n-button 只看 :focus 就上主色）→ 看起来像「还按着」。键盘聚焦保持不动，不把 a11y 一起修没。 */
+function dropMenuBtnFocus(): void {
+  if (lastInputWasKeyboard) return;
+  const el = menuBtnRef.value?.$el as HTMLElement | undefined;
+  el?.blur();
+}
+
 function onMenuBtn(): void {
   openSidebar();
+  dropMenuBtnFocus();
 }
 
 const searchQuery = ref("");
@@ -185,9 +218,11 @@ function submitSearch(): void {
       <!-- 手机/平板：左上角抽屉按钮 -->
       <n-button
         v-if="isCompact"
+        ref="menuBtnRef"
         text
         class="menu-btn"
         @click="onMenuBtn"
+        @focus="dropMenuBtnFocus"
       >
         ☰
       </n-button>
@@ -343,6 +378,18 @@ function submitSearch(): void {
   color: inherit;
 }
 
+/* 手机上还有第二条路径：触摸设备点过之后 :hover 会「粘」在按钮上（iOS Safari 一直粘到
+   点别处，Android 也有同类行为），n-button 的 hover 样式照样上主色 —— 上面那条规则带着
+   :not(:hover)，正好把这条放过去，所以手机上看着「还是亮的」。
+   ☰ 按下去立刻被抽屉盖住、这些高亮本来就看不见，索性在没有真实 hover 的设备上关掉它。
+   特异性：naive-ui 用的是 .n-button--text-type:not(.n-button--disabled):hover（0,3,0），
+   所以这里写 .menu-btn.menu-btn:hover（0,3,0）+ scoped 属性（0,4,0）才压得住。 */
+@media (hover: none), (pointer: coarse) {
+  .menu-btn.menu-btn:hover {
+    color: inherit;
+  }
+}
+
 .phone-pane {
   flex: 1;
   min-width: 0;
@@ -357,7 +404,9 @@ function submitSearch(): void {
   flex-shrink: 0;
 }
 
-.user-avatar {
+/* 头像与用户名的间距。手机档没有名字（那个 span 被 v-if 掉），这 6px 就变成了「右内边距」，
+   头像在按钮的 hover/focus 填充里偏左（实测左 10px / 右 16px）→ 只在真有名字时留间距。 */
+.user-avatar:not(:only-child) {
   margin-right: 6px;
 }
 
