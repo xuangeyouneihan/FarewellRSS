@@ -69,7 +69,12 @@ class Feed(Base):
     subtitle: Mapped[str | None] = mapped_column(Text)  # RSS 源副标题/描述
     published: Mapped[datetime | None] = mapped_column(UTCDateTime())
     updated: Mapped[datetime | None] = mapped_column(UTCDateTime())
-    fetched: Mapped[datetime] = mapped_column(UTCDateTime())
+    fetched: Mapped[datetime] = mapped_column(
+        UTCDateTime()
+    )  # 上次抓取时间
+    full_fetched: Mapped[datetime | None] = mapped_column(
+        UTCDateTime()
+    )  # 上次「完整拿到 body」的抓取时间（304 不更新），全量兜底的节流阀，见 FeedService.update
     author_name: Mapped[str | None] = mapped_column(Text)
     author_href: Mapped[str | None] = mapped_column(Text)
     author_email: Mapped[str | None] = mapped_column(Text)

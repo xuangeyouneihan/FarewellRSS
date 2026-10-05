@@ -54,6 +54,7 @@ class FeedRepository:
             result.published = feed.published if feed.published else result.published
             result.updated = feed.updated if feed.updated else result.updated
             result.fetched = feed.fetched
+            result.full_fetched = feed.fetched
             result.author_name = feed.author.name if feed.author else result.author_name
             result.author_href = feed.author.href if feed.author else result.author_href
             result.author_email = (
@@ -80,6 +81,7 @@ class FeedRepository:
                 published=feed.published,
                 updated=feed.updated,
                 fetched=feed.fetched,
+                full_fetched=feed.fetched,
                 author_name=feed.author.name if feed.author else None,
                 author_href=feed.author.href if feed.author else None,
                 author_email=feed.author.email if feed.author else None,
@@ -104,10 +106,16 @@ class FeedRepository:
         await self._session.delete(feed)
         await self._session.flush()
 
-    async def touch(self, id_: int) -> None:
-        """更新时间戳，用于 304 未修改时避免重复请求"""
+    async def touch(self, id_: int, *, full: bool = False) -> None:
+        """更新时间戳，用于 304 未修改时避免重复请求
+
+        `full=True` 用于「这次是按全量兜底去抓的，但仍然是 304」：那种情况下
+        `full_fetched` 也得跟着往前走，否则每个刷新周期都会再强制全量一次。
+        """
         _logger.debug("更新订阅源 %d 的抓取时间", id_)
         feed = await self.get(id_)
         if feed:
             feed.fetched = datetime.now(UTC)
+            if full:
+                feed.full_fetched = feed.fetched
             await self._session.flush()

@@ -3,7 +3,7 @@ import os
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.schema import CreateIndex, DropIndex
+from sqlalchemy.schema import CreateColumn, CreateIndex, DropIndex
 
 _logger = logging.getLogger(__name__)
 
@@ -69,7 +69,43 @@ async def init_db() -> None:
                         sync_conn.execute(DropIndex(index))
                     sync_conn.execute(CreateIndex(index, if_not_exists=True))
 
+        def _reconcile_columns(sync_conn) -> None:
+            """老库补上后来新增的列（幂等）
+
+            理由与上面索引那段相同：`create_all` 对已存在的表整张跳过，模型里新增的列
+            在老库上根本不会出现，之后任何 SELECT 都会 `no such column`。
+
+            SQLite 的 ADD COLUMN 有限制：加不了外键、加不了 UNIQUE，也不能加「非空且
+            无默认值」的列 —— 所以这里只补**可空列**；碰到非空列直接报出来，那种改动
+            必须手写迁移（并且得想清楚老行填什么值）。
+            """
+            for table in Base.metadata.sorted_tables:
+                existing = {
+                    row[1]
+                    for row in sync_conn.execute(
+                        text(f"PRAGMA table_info({table.name})")
+                    )
+                }
+                for column in table.columns:
+                    if column.name in existing:
+                        continue
+                    if not column.nullable:
+                        _logger.warning(
+                            "表 %s 缺少非空列 %s，ADD COLUMN 补不了，需要手写迁移",
+                            table.name,
+                            column.name,
+                        )
+                        continue
+                    _logger.warning(
+                        "表 %s 缺少列 %s，按模型补上", table.name, column.name
+                    )
+                    ddl = CreateColumn(column).compile(dialect=sync_conn.dialect)
+                    sync_conn.execute(
+                        text(f"ALTER TABLE {table.name} ADD COLUMN {ddl}")
+                    )
+
         await conn.run_sync(_reconcile_indexes)
+        await conn.run_sync(_reconcile_columns)
 
         await conn.execute(
             text("""

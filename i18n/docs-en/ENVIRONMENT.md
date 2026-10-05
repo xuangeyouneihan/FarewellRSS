@@ -45,7 +45,10 @@ OS environment variables  >  .env file in the data directory
 | `FAREWELL_RSS_FEED_REFRESH_INTERVAL`       | `900` (15 minutes)    | Interval (seconds) at which the scheduler refreshes all feeds.                                                  |
 | `FAREWELL_RSS_FEED_DEFAULT_TTL`            | `3600` (1 hour)       | Default TTL (seconds) used when a feed does not declare a TTL. Feeds within their TTL are skipped during fetch. |
 | `FAREWELL_RSS_FEED_MIN_TTL`                | `900` (15 minutes)    | TTL floor (seconds). When a feed declares a TTL below this value, this value is used instead, to prevent overly frequent fetching. |
+| `FAREWELL_RSS_FEED_FULL_REFRESH_INTERVAL`  | `86400` (1 day)       | At most this often, a feed is fetched **without conditional headers** (a full fetch), to recover from a "304 but the content actually changed". |
 | `FAREWELL_RSS_FEED_UPDATE_MAX_CONCURRENCY` | `10`                  | Maximum number of feeds fetched concurrently.                                                                   |
+
+- A 304 does **not** guarantee the content is unchanged: a weak ETag only promises semantic equivalence (not identical bytes); `Last-Modified` has one-second resolution (change the content within the same second and a server will still answer 304); a CDN / reverse proxy may compare against a stale object. Hit any of those and the feed silently stops updating forever (all you get is a "not modified" line in the log). Periodically dropping the conditional headers is the only mitigation that covers all of these — at the cost of one extra full download per feed per day.
 
 ### Password Hashing
 

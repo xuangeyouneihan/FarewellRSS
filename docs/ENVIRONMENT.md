@@ -45,7 +45,10 @@ OS 环境变量  >  数据目录下的 .env 文件
 | `FAREWELL_RSS_FEED_REFRESH_INTERVAL`       | `900`（15 分钟） | 调度器刷新所有订阅源的间隔（秒）。                                       |
 | `FAREWELL_RSS_FEED_DEFAULT_TTL`            | `3600`（1 小时） | 订阅源 feed 未声明 TTL 时的默认 TTL（秒）。TTL 内的订阅源跳过抓取。      |
 | `FAREWELL_RSS_FEED_MIN_TTL`                | `900`（15 分钟） | TTL 下限（秒）。feed 声明的 TTL 低于此值时按此值计，防止过于频繁的抓取。 |
+| `FAREWELL_RSS_FEED_FULL_REFRESH_INTERVAL`  | `86400`（1 天）  | 每隔这么久完整抓一次（**不带条件头**），兜底「服务端回了 304 但内容其实变了」。 |
 | `FAREWELL_RSS_FEED_UPDATE_MAX_CONCURRENCY` | `10`             | 同时抓取的订阅源最大并发数。                                             |
+
+- 304 **不一定**等于内容没变：弱 ETag 按定义只保证语义等价、不保证字节相同；Last-Modified 只有秒级精度（同一秒内改了内容，服务端照样回 304）；CDN / 反代还会拿旧对象比对。踩上任何一种，源就会静默地永远不更新（日志里只有一条「未修改」）。周期性丢掉条件头是唯一能覆盖以上全部原因的兜底，代价是每源每天多一次完整下载。
 
 ### 密码哈希
 
