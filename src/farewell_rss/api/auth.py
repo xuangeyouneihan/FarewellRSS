@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import jobs
+from .._version import __version__
 from ..api.deps import get_current_user, get_user_service
 from ..db.db import get_session
 from ..db.models import User
@@ -46,11 +47,9 @@ def _spawn_background(coro: Coroutine[Any, Any, None]) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-def _get_source() -> str:
-    """返回RSS服务标识，带版本号"""
-    from importlib.metadata import version
-
-    return f"FarewellRSS-{version('farewell_rss')}"
+# 客户端没传 source 时的兜底标识。Pydantic 的默认值在**类体**里求值（import 时算一次），
+# 所以提成模块级常量：这样版本号只查一次，也不会在 import 阶段因为取不到元数据而抛。
+_SOURCE = f"FarewellRSS-{__version__}"
 
 
 class LoginParams(BaseModel):
@@ -58,7 +57,7 @@ class LoginParams(BaseModel):
     Passwd: str  # 密码（Google Reader/FreshRSS 标准字段）
     accountType: str = "GOOGLE"  # 固定
     service: str = "reader"  # 固定
-    source: str = _get_source()  # RSS 服务标识
+    source: str = _SOURCE  # RSS 服务标识
 
 
 async def _sign_in(login_params: LoginParams, user_service: UserService) -> Response:

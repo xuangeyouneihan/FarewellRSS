@@ -1,10 +1,16 @@
+import http.server
+import ssl
+import threading
 import time
+import urllib.error
 from datetime import UTC, datetime
 from unittest.mock import patch
 
 import feedparser
 import pytest
 
+from farewell_rss._version import __version__
+from farewell_rss.feed_fetcher import feed_fetcher as feed_fetcher_module
 from farewell_rss.feed_fetcher.feed_fetcher import (
     FetchedAuthor,
     FetchedEnclosure,
@@ -157,6 +163,26 @@ class TestToHtml:
 # ─── fetch() 集成测试（mock 网络，真实 feedparser 解析）──────────────────
 
 
+def _parsed_html_body() -> feedparser.FeedParserDict:
+    """复现「拿到的是 HTML 而不是 feed」：feedparser 会置 bozo=NonXMLContentType"""
+    return feedparser.parse(
+        b"<html><body>challenge</body></html>",
+        response_headers={"content-type": "text/html"},
+    )
+
+
+async def _run_fetch_with_parsed(
+    parsed: feedparser.FeedParserDict,
+) -> FetchedFeed | None:
+    """用预先造好的 feedparser 结果替换网络请求，调用 fetch()。"""
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return parsed
+
+    with patch("asyncio.to_thread", fake_to_thread):
+        return await fetch("https://example.com/feed.xml")
+
+
 async def _run_fetch_with_xml(xml: str) -> FetchedFeed | None:
     """用 XML 字符串替换网络请求，调用 fetch()。"""
     parsed = feedparser.parse(xml)
@@ -167,13 +193,7 @@ async def _run_fetch_with_xml(xml: str) -> FetchedFeed | None:
         parsed["etag"] = None
     if "modified" not in parsed:
         parsed["modified"] = None
-
-    async def fake_to_thread(func, *args, **kwargs):
-        return parsed
-
-    with patch("asyncio.to_thread", fake_to_thread):
-        result = await fetch("https://example.com/feed.xml")
-    return result
+    return await _run_fetch_with_parsed(parsed)
 
 
 class TestFetchRss:
@@ -223,11 +243,60 @@ class TestFetchAtom:
         assert "<p>纯文本摘要</p>" in (entry.summary or "")
 
 
+class TestUserAgent:
+    def test_agent_shape(self):
+        """UA 形制：`FarewellRSS/<版本> (<系统>; <仓库地址>)`
+
+        版本号的来源与兜底在 `test/farewell_rss/version_test.py` 里测。
+        """
+        assert feed_fetcher_module._AGENT.startswith(f"FarewellRSS/{__version__} (")
+        assert feed_fetcher_module._REPO in feed_fetcher_module._AGENT
+
+
 class TestFetchEdgeCases:
     async def test_empty_feed(self):
         """无条目的 RSS 返回 None"""
         result = await _run_fetch_with_xml(EMPTY_FEED_XML)
         assert result is None
+
+    async def test_not_modified(self):
+        """304 未修改返回 None（增量更新靠它，不算失败）"""
+        parsed = feedparser.parse(RSS_XML)
+        parsed["status"] = 304
+
+        assert await _run_fetch_with_parsed(parsed) is None
+
+    async def test_transport_error_without_status(self):
+        """传输层失败（证书/DNS/连接/超时）时 feedparser 连 status 都不设。
+
+        修之前这里会因 `raw_feed.status` 抛 AttributeError —— 网络失败被伪装成代码 bug。
+        真实案例：https://www.sitstars.com/feed/ 的证书过期。
+        """
+        parsed = feedparser.parse(EMPTY_FEED_XML)
+        assert "status" not in parsed
+        parsed["bozo"] = True
+        parsed["bozo_exception"] = urllib.error.URLError(
+            ssl.SSLCertVerificationError("certificate has expired")
+        )
+
+        with pytest.raises(FetchError):
+            await _run_fetch_with_parsed(parsed)
+
+    async def test_http_error(self):
+        """403/404/5xx 抛 FetchError：错误页不能被当成「源没有条目」"""
+        parsed = _parsed_html_body()
+        parsed["status"] = 403
+
+        with pytest.raises(FetchError):
+            await _run_fetch_with_parsed(parsed)
+
+    async def test_unparsable_body_without_entries(self):
+        """2xx + 解析异常 + 无条目：行为不变（仍返回 None），只是日志能分辨了"""
+        parsed = _parsed_html_body()
+        parsed["status"] = 200
+        assert parsed.bozo
+
+        assert await _run_fetch_with_parsed(parsed) is None
 
     async def test_network_error(self):
         """网络异常应抛 FetchError"""
@@ -238,3 +307,39 @@ class TestFetchEdgeCases:
         with patch("asyncio.to_thread", fake_to_thread):  # noqa: SIM117
             with pytest.raises(FetchError):
                 await fetch("https://example.com/dead.xml")
+
+    async def test_sends_own_user_agent(self):
+        """抓取要带自己的 UA（`FarewellRSS/<版本> (<系统>; <仓库地址>)`）
+
+        feedparser 默认的 `feedparser/x.y (+…)` 会被一些 WAF 拦：实测
+        `free.apprcn.com/feed/` 回 403，换成自己的 UA 就是 200 + 3 条。这里用本地
+        HTTP 服务端真实地看一眼收到的是什么。
+        """
+        seen: dict[str, str | None] = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen["ua"] = self.headers.get("User-Agent")
+                data = RSS_XML.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/rss+xml")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):  # 别往测试输出里喷日志
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            result = await fetch(f"http://127.0.0.1:{server.server_address[1]}/feed")
+        finally:
+            server.shutdown()
+
+        assert result is not None
+        assert seen["ua"] == feed_fetcher_module._AGENT
+        assert seen["ua"] is not None
+        assert seen["ua"].startswith("FarewellRSS/")
+        assert feed_fetcher_module._REPO in seen["ua"]
+        assert "feedparser" not in seen["ua"]

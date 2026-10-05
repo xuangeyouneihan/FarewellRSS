@@ -1,13 +1,24 @@
 import asyncio
 import html
 import logging
+import platform
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 
 import feedparser  # type: ignore[import-untyped]
 
+from .._version import __version__
+
 _logger = logging.getLogger(__name__)
+
+# 与 pyproject.toml 的 [project.urls] Repository 一致；UA 里带出处，源站能找到人
+_REPO = "https://github.com/xuangeyouneihan/FarewellRSS"
+
+# UA 形制对齐 FreshRSS（`FreshRSS/<版本> (<OS>; <官网>)`）：名字 + 版本 + 出处，源站从日志
+# 里能认出我们、也找得到人。**不能用 feedparser 的默认 UA**（`feedparser/x.y (+…)`）：
+# 一些 WAF 专门拦它，实测 `free.apprcn.com/feed/` 回 403（换自己的 UA 就是 200 + 3 条）。
+_AGENT = f"FarewellRSS/{__version__} ({platform.system()}; {_REPO})"
 
 
 class FetchError(Exception):
@@ -189,26 +200,58 @@ def _to_html(text: str | None) -> str | None:
 async def fetch(
     url: str, etag: str | None = None, modified: str | None = None
 ) -> FetchedFeed | None:
-    """获取 RSS 源"""
+    """获取 RSS 源
+
+    抓取失败（传输层、HTTP 层）一律抛 `FetchError`；返回 `None` 只表示两件事：
+    304 未修改，或者 2xx 且这个源目前确实没有条目 —— 调用方据此决定要不要 touch。
+    """
     raw_feed = None
     try:
         raw_feed = await asyncio.to_thread(
-            feedparser.parse, url, etag=etag, modified=modified
+            feedparser.parse, url, etag=etag, modified=modified, agent=_AGENT
         )
     except Exception as e:
         _logger.exception("订阅源 %s 获取失败", url)
         raise FetchError(url) from e
 
-    if raw_feed.status == 304:
+    status = raw_feed.get("status")
+    if status is None:
+        # 传输层失败（TLS 校验、DNS、连接、超时）：feedparser 只在结果里留下
+        # bozo_exception，**连 status 都不设**，所以不能直接取 raw_feed.status。
+        _logger.warning(
+            "订阅源 %s 抓取失败，没有拿到响应：%s", url, raw_feed.get("bozo_exception")
+        )
+        raise FetchError(url)
+    if status == 304:
         _logger.debug("订阅源 %s 未修改", url)
         return None
-    if not raw_feed.entries:
-        _logger.info("订阅源 %s 没有条目", url)
-        return None
-    if raw_feed.bozo:
+    if status >= 400:
+        # 403（WAF / 防盗链）、404（源已失效）、5xx（上游故障）：feedparser 会把错误页
+        # 也喂给解析器，于是 entries 为空 —— 必须在这里拦住，否则会被当成「源没有条目」。
+        _logger.warning(
+            "订阅源 %s 返回 HTTP %d（content-type: %s），本次抓取失败",
+            url,
+            status,
+            raw_feed.headers.get("content-type"),
+        )
+        raise FetchError(url)
+    if raw_feed.bozo and raw_feed.entries:
+        # 有条目还能解析出来：宽进严出，照常返回，只留一条警告
         _logger.warning(
             "订阅源 %s 解析异常，bozo_exception: %s", url, raw_feed.bozo_exception
         )
+    if not raw_feed.entries:
+        if raw_feed.bozo:
+            # 2xx、解析报错、且一条都没有：拿到的多半不是 feed（WAF 挑战页、HTML 错误页），
+            # 与「源本身是空的」是两回事，日志要能分辨。
+            _logger.warning(
+                "订阅源 %s 没有条目，且解析异常（content-type: %s）：拿到的可能不是 feed",
+                url,
+                raw_feed.headers.get("content-type"),
+            )
+        else:
+            _logger.info("订阅源 %s 没有条目", url)
+        return None
 
     feed_title = None
     feed_title_detail = raw_feed.feed.get("title_detail")
