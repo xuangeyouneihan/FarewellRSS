@@ -54,6 +54,12 @@ class User(Base):
     )  # 用户被删除的时间，若为 None 则表示未被删除
 
 
+# 「还没抓过内容」的哨兵值。导入 OPML 时只建记录、不抓内容（对齐 FreshRSS：导入只
+# 建订阅，抓取交给之后的刷新），这类记录的 fetched 就写这个值 —— 它早于任何 TTL 窗口，
+# 所以调度器下一轮必然把它挑出来抓；同时「没抓过」与「抓过但没内容」在数据上也区分得开。
+NEVER_FETCHED = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 class Feed(Base):
     """RSS 源的固有属性，不会随用户的订阅偏好而改变"""
 
@@ -71,7 +77,7 @@ class Feed(Base):
     updated: Mapped[datetime | None] = mapped_column(UTCDateTime())
     fetched: Mapped[datetime] = mapped_column(
         UTCDateTime()
-    )  # 上次抓取时间
+    )  # 上次抓取时间；`NEVER_FETCHED` = 还从未抓过内容
     full_fetched: Mapped[datetime | None] = mapped_column(
         UTCDateTime()
     )  # 上次「完整拿到 body」的抓取时间（304 不更新），全量兜底的节流阀，见 FeedService.update

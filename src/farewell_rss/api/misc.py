@@ -6,7 +6,10 @@ from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import jobs
+from ..db.db import get_session
 from ..db.models import LabelType, User
 from ..services.feed import FeedService
 from ..services.label import LabelService
@@ -184,6 +187,7 @@ def _make_outline(parent: ET.Element, subscription, feed) -> None:
 async def import_opml(
     request: Request,
     user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
     subscription_service: Annotated[
         SubscriptionService, Depends(get_subscription_service)
     ],
@@ -191,7 +195,8 @@ async def import_opml(
 ) -> Response:
     """导入 OPML
 
-    单个源失败只跳过它自己（见 _import_outlines），其余照常导入。
+    单个源失败只跳过它自己（见 _import_outlines），其余照常导入 —— 抓取失败与写库失败
+    都得挡住，否则一个坏源会把整份导入带走。
     """
     body = await request.body()
     if not body:
@@ -220,37 +225,50 @@ async def import_opml(
     async def _import_outlines(parent_el: ET.Element, folder_id: int | None) -> int:
         """导入一层 outline，返回被跳过的条数。
 
-        **单个源/文件夹失败只跳过它自己**，不带走整份导入：subscribe 会同步抓一次
-        源，一个坏 URL、一次网络抖动都会抛异常；而请求级事务是整批提交的
-        （repository 只 flush），异常冒出去会把已经导好的全部回滚掉。
+        **单个源/文件夹失败只跳过它自己**，不带走整份导入。失败来源与保护分两层：
+
+        * 这条 outline 本身有问题（URL 不像话、写库时被模型拒绍……）→ 每条的
+          `except Exception` 兜住；
+        * 其中**写库**失败（flush 里抛）会把这个 session 标成「必须先 rollback」，之后
+          每个操作都抛 `PendingRollbackError` —— 只有 `except` 的话，坏源后面所有 outline
+          都被连坐（包括下一次 flush 和最后那次 commit），整批回滚：实测 HTTP 500、
+          库里 0 个源。所以每条 outline 还要有自己的 savepoint。
+
+        savepoint 回滚时 SQLAlchemy 会把这条里新增的对象 expunge 掉，坏对象不会在最后那次
+        commit 上再炸一次。整批仍然只 commit 一次（请求级事务边界不变）。
+
+        这里**不抓取**（`subscribe(fetch=False)`）：网络失败不是导入该管的事，内容交给
+        导入后触发的那一轮刷新。
         """
         skipped = 0
         for outline in parent_el.findall("outline"):
             # 只捕 Exception：CancelledError 这类 BaseException 必须继续往上抛
             try:
-                xml_url = outline.get("xmlUrl") or outline.get("xmlurl")
-                if xml_url:
-                    title = outline.get("title") or outline.get("text") or ""
-                    await subscription_service.subscribe(
-                        user=user,
-                        feed_href=xml_url,
-                        title=title,
-                        folder_id=folder_id,
-                    )
-                else:
-                    name = outline.get("title") or outline.get("text") or ""
-                    children = outline.findall("outline")
-                    if name and children:
-                        folder = await label_service.get_by_user_name_type(
-                            user, name, LabelType.FOLDER
+                async with session.begin_nested():
+                    xml_url = outline.get("xmlUrl") or outline.get("xmlurl")
+                    if xml_url:
+                        title = outline.get("title") or outline.get("text") or ""
+                        await subscription_service.subscribe(
+                            user=user,
+                            feed_href=xml_url,
+                            title=title,
+                            folder_id=folder_id,
+                            fetch=False,
                         )
-                        if not folder:
-                            folder = await label_service.create(
+                    else:
+                        name = outline.get("title") or outline.get("text") or ""
+                        children = outline.findall("outline")
+                        if name and children:
+                            folder = await label_service.get_by_user_name_type(
                                 user, name, LabelType.FOLDER
                             )
-                        skipped += await _import_outlines(outline, folder.id)
-                    else:
-                        skipped += await _import_outlines(outline, folder_id)
+                            if not folder:
+                                folder = await label_service.create(
+                                    user, name, LabelType.FOLDER
+                                )
+                            skipped += await _import_outlines(outline, folder.id)
+                        else:
+                            skipped += await _import_outlines(outline, folder_id)
             except Exception:
                 skipped += 1
                 _logger.exception(
@@ -272,4 +290,8 @@ async def import_opml(
             user.id,
             skipped,
         )
+    # 导入只建记录、不抓内容，所以这里立刻补一轮（对齐 FreshRSS 导入后的
+    # actualizeFeedsAndCommit）：否则刚导入的源要等最多一个刷新周期才有内容。
+    # 用后台作业：一次导入几十个源，在请求里 await 会把响应拖到分钟级。
+    jobs.spawn(jobs.refresh_all_feeds())
     return Response("OK", media_type="text/plain")

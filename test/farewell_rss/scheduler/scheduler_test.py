@@ -225,7 +225,7 @@ async def test_update_all_feeds_writes_every_feed(
     monkeypatch.setattr(feed_service_module, "fetch", _fake_fetch())
     caplog.set_level(logging.ERROR, logger="farewell_rss.scheduler.scheduler")
 
-    await scheduler._update_all_feeds()
+    await scheduler.update_all_feeds()
 
     entries, refreshed = await _written(file_session_factory)
     assert entries == _FEEDS, "有条目没写进库"
@@ -266,7 +266,7 @@ async def test_failed_fetch_leaves_no_half_state(
     monkeypatch.setattr(feed_service_module, "fetch", _bad_fetch)
     caplog.set_level(logging.ERROR, logger="farewell_rss.scheduler.scheduler")
 
-    await scheduler._update_all_feeds()
+    await scheduler.update_all_feeds()
 
     entries, refreshed = await _written(file_session_factory)
     assert entries == 0, "条目阶段失败，却有条目落了库（半个事务）"
@@ -297,7 +297,7 @@ async def test_shared_session_does_lose_writes(
 
     monkeypatch.setattr(scheduler, "SessionLocal", _shared_factory)
     try:
-        await scheduler._update_all_feeds()
+        await scheduler.update_all_feeds()
         entries, refreshed = await _written(file_session_factory)
     finally:
         await shared.close()
@@ -326,7 +326,7 @@ async def test_run_survives_a_bad_cycle(file_session_factory, monkeypatch, caplo
         cycles.append("cleanup")
         return []
 
-    monkeypatch.setattr(scheduler, "_update_all_feeds", bad_update)
+    monkeypatch.setattr(scheduler, "update_all_feeds", bad_update)
     monkeypatch.setattr(scheduler, "prune_orphan_feeds", fake_cleanup)
 
     task = asyncio.create_task(scheduler.run())

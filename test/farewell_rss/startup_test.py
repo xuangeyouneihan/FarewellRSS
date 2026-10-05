@@ -47,21 +47,40 @@ def _probe(url: str) -> int | None:
         return None
 
 
-def _start_and_wait(data_dir: Path, port: int) -> tuple[int | None, str]:
-    """起进程、等它应答；**无论如何都收尸**，并把启动日志带回来（断言失败时要看）"""
-    env = {
+def _child_env(data_dir: Path, port: int) -> dict[str, str]:
+    """子进程的环境变量
+
+    `PYTHONIOENCODING` 必须钉死 utf-8：启动日志里有中文，而这个测试要把子进程的输出读
+    回来做断言，两边一旦不一致就会出事 —— 只按 locale（中文 Windows 上是 GBK）解码、
+    子进程却吐 UTF-8 时，`subprocess` 的读取线程会抛 `UnicodeDecodeError`，`output`
+    直接变成 `None`，断言处报成 `TypeError: argument of type 'NoneType' is not a
+    container`（看着像代码坏了，其实是编码）；反过来只让子进程说 UTF-8 而不改解码，
+    在 GBK 机器上又会把中文解成乱码、断言失配。所以两端一起钉。
+
+    **必须放在 `**os.environ` 之后**：宿主环境里已有的同名变量（比如某个终端里
+    `export PYTHONIOENCODING=utf-8` 漏进来的）不能把子进程带偏。
+    """
+    return {
         **os.environ,
         "FAREWELL_RSS_DATA_DIR": str(data_dir),
         "FAREWELL_RSS_PORT": str(port),
         # 让调度器只跑一轮，别在测试里干活
         "FAREWELL_RSS_FEED_REFRESH_INTERVAL": "999999",
+        "PYTHONIOENCODING": "utf-8",
     }
+
+
+def _start_and_wait(data_dir: Path, port: int) -> tuple[int | None, str]:
+    """起进程、等它应答；**无论如何都收尸**，并把启动日志带回来（断言失败时要看）"""
     proc = subprocess.Popen(
         [sys.executable, "-c", "from farewell_rss.main import main; main()"],
-        env=env,
+        env=_child_env(data_dir, port),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        # 与子进程的 PYTHONIOENCODING 对齐；errors 只是兵底，不让半个字节把整条断言带走
+        encoding="utf-8",
+        errors="replace",
     )
     status: int | None = None
     deadline = time.monotonic() + _TIMEOUT
@@ -94,3 +113,14 @@ def test_app_starts_and_answers(tmp_path):
     assert "前端静态文件目录" in output or "未找到前端构建产物" in output, (
         f"启动日志里看不到前端产物的判断：\n{output}"
     )
+
+
+def test_child_env_overrides_leaked_io_encoding(monkeypatch, tmp_path):
+    """宿主环境里的 PYTHONIOENCODING 不能影响子进程：两端必须都是 UTF-8
+
+    不这么钉的话，父进程里 leak 一个 `PYTHONIOENCODING=utf-8` 就能把上面那条启动
+    测试搞挂（表现为 `TypeError: ... 'NoneType' ...`，看起来像代码回归）。
+    """
+    monkeypatch.setenv("PYTHONIOENCODING", "gbk")
+
+    assert _child_env(tmp_path, 1)["PYTHONIOENCODING"] == "utf-8"

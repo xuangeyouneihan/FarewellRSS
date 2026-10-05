@@ -1,8 +1,9 @@
 import logging
 import os
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
-from ..db.models import Feed
+from ..db.models import NEVER_FETCHED, Feed
 from ..db.repositories.feed import FeedRepository
 from ..feed_fetcher.feed_fetcher import FetchError, fetch
 from .entry import EntryService
@@ -13,6 +14,16 @@ _logger = logging.getLogger(__name__)
 _FULL_REFRESH_INTERVAL = int(
     os.getenv("FAREWELL_RSS_FEED_FULL_REFRESH_INTERVAL", "86400")
 )
+
+
+def _is_http_url(href: str) -> bool:
+    """能不能当源去抓：只要 http(s) 且带主机名
+
+    占位记录不校验就入库的话，OPML 里的垃圾串会变成一条永远抓不上、每轮刷新都重试
+    并记警告的订阅。
+    """
+    parts = urlparse(href)
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
 
 
 class FeedService:
@@ -42,6 +53,20 @@ class FeedService:
             return await self._repository.upsert(feed)
         # 此处不记日志，因为 feed_fetcher 那里已经记录了日志
         return None
+
+    async def get_or_create_stub(self, href: str) -> Feed:
+        """建一条「还没抓过内容」的源记录（**不抓取**）；已存在就直接返回
+
+        给 OPML 导入用：导入不该依赖网络（几十个源串行抓会很慢），也不该因为某个源
+        403/503 就少一条订阅。内容交给之后的刷新 —— `NEVER_FETCHED` 早于任何 TTL，
+        调度器下一轮必然把它挑出来抓（见 `scheduler.update_all_feeds`）。
+
+        URL 不像话直接报错（由调用方当作该条 outline 失败），免得种下一条永远失败、
+        每轮都重试的订阅。
+        """
+        if not _is_http_url(href):
+            raise ValueError(f"不是可抓取的 URL: {href}")
+        return await self._repository.get_or_create_stub(href, NEVER_FETCHED)
 
     async def update(self, feed: Feed) -> Feed | None:
         # 假 304 兜底：弱 ETag（按定义只保证语义等价、不保证字节相同）、秒级

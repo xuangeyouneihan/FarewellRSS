@@ -41,9 +41,20 @@ class SubscriptionService:
         link: str | None = None,
         icon: bytes | None = None,
         folder_id: int | None = None,
+        fetch: bool = True,
     ) -> Subscription:
+        """订阅一个源
+
+        `fetch=True`（默认）：立刻抓一次拿标题/图标，抓不到就拒绝订阅 —— 交互式订阅
+        （quickadd / subscription edit）走这条，用户应该当场看到失败。
+
+        `fetch=False`：只建记录、不抓内容 —— 导入 OPML 走这条（对齐 FreshRSS：它导入
+        时只建订阅，抓取交给之后的刷新）。一个源 403/503 不该让整份导入少一条订阅，
+        导入也不必串行等几十次网络；内容交给下一轮刷新（占位记录的 `fetched` 是
+        `NEVER_FETCHED`，必然被挑中）。
+        """
         _logger.info(
-            "用户 %s（%d）订阅源 %s，自定义标题：%s，副标题：%s，链接：%s，图标：%s，文件夹：%s",
+            "用户 %s（%d）订阅源 %s，自定义标题：%s，副标题：%s，链接：%s，图标：%s，文件夹：%s，fetch：%s",
             user.username,
             user.id,
             feed_href,
@@ -52,8 +63,13 @@ class SubscriptionService:
             link,
             icon,
             folder_id,
+            fetch,
         )
-        feed = await self._feed_service.insert_by_href(feed_href)
+        feed = (
+            await self._feed_service.insert_by_href(feed_href)
+            if fetch
+            else await self._feed_service.get_or_create_stub(feed_href)
+        )
         if feed is None:
             raise ValueError(f"无法通过 href 插入或获取订阅源: {feed_href}")
         return await self._repository.upsert(

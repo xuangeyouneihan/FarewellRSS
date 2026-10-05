@@ -1,7 +1,5 @@
-import asyncio
 import logging
-from collections.abc import Coroutine
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import (
     APIRouter,
@@ -34,18 +32,6 @@ from ..services.user import UserService
 _logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["auth"])
-
-# 后台作业的引用必须存住：asyncio.create_task() 的返回值没人引用时，任务可能在跑完
-# 之前就被 GC 掉（官方文档明确要求保存引用）。那个作业是「删账号之后清数据」，
-# 被回收掉就是静默不执行。
-_background_tasks: set[asyncio.Task] = set()
-
-
-def _spawn_background(coro: Coroutine[Any, Any, None]) -> None:
-    task = asyncio.create_task(coro)
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
 
 # 客户端没传 source 时的兜底标识。Pydantic 的默认值在**类体**里求值（import 时算一次），
 # 所以提成模块级常量：这样版本号只查一次，也不会在 import 阶段因为取不到元数据而抛。
@@ -317,7 +303,7 @@ async def delete_account(
     # 看不见本请求尚未提交的软删除（目标用户会被当成“没被删”而继续跑）
     await session.commit()
     # 软删除已生效（认证立即失效），数据清理是独立作业、自建 session 在后台跑
-    _spawn_background(jobs.hard_delete_user(target.id))
+    jobs.spawn(jobs.hard_delete_user(target.id))
     return Response("OK", media_type="text/plain")
 
 

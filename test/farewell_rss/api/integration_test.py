@@ -1,5 +1,6 @@
 """API 集成测试 —— "顾客点了份炒饭" 全链路。"""
 
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest_asyncio
@@ -125,6 +126,9 @@ async def client(monkeypatch):
     # 会指向真实数据目录）。这里把它挡掉，只验证 API 层契约（软删除后立即
     # 无法登录）；作业本身的清理逻辑由 jobs_test.py 覆盖。
     monkeypatch.setattr("farewell_rss.jobs.hard_delete_user", AsyncMock())
+    # 导入 OPML 之后会 spawn 一轮后台刷新（`jobs.refresh_all_feeds`）。它自建 session、
+    # 会真去联网抓源，所以在测试里一律挡掉；要验证「有没有触发」的用例自己再断言一次。
+    monkeypatch.setattr("farewell_rss.jobs.refresh_all_feeds", AsyncMock())
 
     # 把应用的 session 工厂换到测试引擎（否则 get_session 会去连真实数据目录）
     monkeypatch.setattr("farewell_rss.db.db.SessionLocal", TestSession)
@@ -369,37 +373,27 @@ async def test_import_standard_opml(client: AsyncClient):
     ]
 
 
-async def test_import_opml_skips_broken_feed(client: AsyncClient):
-    """OPML 里某个源抓不动：跳过它，其余照常导入（不要整份回滚）
+async def test_import_opml_does_not_fetch_feeds(client: AsyncClient):
+    """导入 OPML 只建订阅、**不抓内容**（对齐 FreshRSS），抓取交给导入后的那一轮刷新
 
-    请求级事务是整批提交的（repository 只 flush），“一个坏 URL 带走整份导入”
-    是很容易踩的写法——这条测试钉住那件事：坏源在中间，两边的好源都必须在。
+    以前 `subscribe()` 会同步抓一次，于是「某个源抓不到」就变成「少一条订阅」
+    （403/503/网络抖动都算），而且几十个源要串行等网络。现在导入期间压根不联网：
+    抓不到的源照样入库（占位记录，内容由之后的那轮刷新补）。
     """
-    headers = await _register(client, "opml-skip-user")
+    headers = await _register(client, "opml-nofetch-user")
     opml = b"""<?xml version="1.0" encoding="UTF-8"?>
 <opml version="2.0">
   <body>
     <outline type="rss" text="Good one" xmlUrl="https://example.com/good-1.xml" />
-    <outline type="rss" text="Broken" xmlUrl="https://example.com/broken.xml" />
+    <outline type="rss" text="Unreachable" xmlUrl="https://example.com/unreachable.xml" />
     <outline type="rss" text="Good two" xmlUrl="https://example.com/good-2.xml" />
   </body>
 </opml>"""
 
-    from farewell_rss.feed_fetcher.feed_fetcher import FetchedFeed
+    async def _explode(url, etag=None, modified=None):
+        raise AssertionError("导入期间不该抓取任何源")
 
-    async def _flaky_fetch(url, etag=None, modified=None):
-        if "broken" in url:
-            raise RuntimeError("抓不到这个源")
-        # 每个 URL 给一个独立的源：_fake_fetch 固定返回 TEST_FEED，
-        # 那样两个好源会落成同一行 feed（订阅只剩一条），就测不出「两个都在」
-        return FetchedFeed(
-            href=url,
-            title=url,
-            fetched=TEST_FEED.fetched,
-            entries=list(TEST_FEED.entries),
-        )
-
-    with patch("farewell_rss.services.feed.fetch", side_effect=_flaky_fetch):
+    with patch("farewell_rss.services.feed.fetch", side_effect=_explode):
         r = await client.post(
             f"{BASE}/subscription/import",
             content=opml,
@@ -409,10 +403,55 @@ async def test_import_opml_skips_broken_feed(client: AsyncClient):
 
     r = await client.get(f"{BASE}/subscription/list", headers=headers)
     titles = sorted(s["title"] for s in r.json()["subscriptions"])
+    assert titles == ["Good one", "Good two", "Unreachable"], titles
+
+
+async def test_import_opml_survives_db_write_failure(client: AsyncClient, monkeypatch):
+    """OPML 里某条**写库**失败：同样只跳过它自己，其余照常导入
+
+    抓取失败有每条的 `except` 兜住就够了；写库失败不够 —— 异常发生在 flush 里，
+    SQLAlchemy 会把 session 标成「必须先 rollback」，之后每个 outline 都抛
+    `PendingRollbackError`、最后 commit 也抛（实测过：HTTP 500、库里 0 个源）。
+    这条钉住 savepoint 那层隔离。
+
+    制造失败的办法：把那条 outline 的 `fetched` 换成 naive datetime —— 模型的 UTCDateTime
+    只在**写库时**才拒绍它。导入路径已经不抓内容了，所以走不了「坏条目」那条老路。
+    """
+    from farewell_rss.db.repositories.feed import FeedRepository
+
+    headers = await _register(client, "opml-db-fail-user")
+    opml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <body>
+    <outline type="rss" text="Good one" xmlUrl="https://example.com/good-1.xml" />
+    <outline type="rss" text="Bad write" xmlUrl="https://example.com/bad-write.xml" />
+    <outline type="rss" text="Good two" xmlUrl="https://example.com/good-2.xml" />
+  </body>
+</opml>"""
+
+    real_stub = FeedRepository.get_or_create_stub
+
+    async def _flaky_stub(self, href, fetched):
+        if "bad-write" in href:
+            fetched = datetime(2026, 1, 1)  # naive：写库时才抛
+        return await real_stub(self, href, fetched)
+
+    monkeypatch.setattr(FeedRepository, "get_or_create_stub", _flaky_stub)
+
+    r = await client.post(
+        f"{BASE}/subscription/import",
+        content=opml,
+        headers={**headers, "Content-Type": "text/xml"},
+    )
+    assert r.status_code == 200, r.text
+
+    r = await client.get(f"{BASE}/subscription/list", headers=headers)
+    titles = sorted(s["title"] for s in r.json()["subscriptions"])
     assert titles == ["Good one", "Good two"], titles
 
 
 async def test_export_opml_filename_uses_username(client: AsyncClient):
+    """导出文件名用用户名，不用容易乱码的英文标题"""
     headers = await _register(client, "opml-export-user")
 
     r = await client.get(f"{BASE}/subscription/export", headers=headers)

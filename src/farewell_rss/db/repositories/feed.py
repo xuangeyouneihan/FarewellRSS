@@ -101,6 +101,25 @@ class FeedRepository:
 
         return result
 
+    async def get_or_create_stub(self, href: str, fetched: datetime) -> Feed:
+        """按 href 拿源；没有就建一条「还没抓过内容」的占位记录（**不抓取**）
+
+        与 `upsert` 的区别：这里不碰标题/图标/etag/条目 —— 那些都要抓一次才知道，
+        而这条路径刻意不抓（导入 OPML 用）。
+
+        `fetched` 由调用方给（服务层传 `NEVER_FETCHED`）而不是写死在这里：测试要能
+        换一个非法值来模拟「写库时才发现不对」的真实 flush 失败。
+        """
+        feed = await self.get_by_href(href)
+        if feed:
+            _logger.debug("订阅源已存在 %d，复用，href: %s", feed.id, href)
+            return feed
+        _logger.debug("插入未抓取过的订阅源占位记录，href: %s", href)
+        feed = Feed(href=href, fetched=fetched)
+        self._session.add(feed)
+        await self._session.flush()
+        return feed
+
     async def delete(self, feed: Feed) -> None:
         _logger.debug("删除订阅源 %d", feed.id)
         await self._session.delete(feed)

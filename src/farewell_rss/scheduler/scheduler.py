@@ -38,7 +38,7 @@ def _should_update(feed, subscription_counts: dict[int, int]) -> bool:
     return True
 
 
-async def _update_all_feeds() -> None:
+async def update_all_feeds() -> None:
     """更新所有订阅源的内容
 
     **每个并发任务自己开一个 session。** `AsyncSession` 不能被两个任务并发使用，而这里
@@ -140,7 +140,7 @@ async def run() -> None:
     )
     while True:
         try:
-            await _update_all_feeds()
+            await update_all_feeds()
         except Exception:
             # 单轮出错不能让 while True 退出：main.py 用 create_task 起这个任务，
             # 异常跑出去就再也没人重启，之后整个实例既不刷新也不清理

@@ -8,11 +8,12 @@ Last-Modified 只有秒级精度（同一秒内改内容，服务端 `mtime_sec 
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from farewell_rss.db.models import Base, Feed
+from farewell_rss.db.models import NEVER_FETCHED, Base, Feed
 from farewell_rss.factory import build_services
 from farewell_rss.feed_fetcher.feed_fetcher import FetchedEntry, FetchedFeed
 from farewell_rss.services import feed as feed_service_module
@@ -163,3 +164,43 @@ async def test_insert_by_href_records_a_full_fetch(session, monkeypatch):
     assert feed is not None
     assert feed.full_fetched == fetched_at
     assert calls == [{"url": href, "etag": None, "modified": None}]
+
+
+async def test_get_or_create_stub_creates_placeholder(session, monkeypatch):
+    """占位记录（OPML 导入用）：一次都不抓，`fetched` = NEVER_FETCHED
+
+    = 还没抽过内容 → 早于任何 TTL → 调度器下一轮必然把它挑出来抓。
+    """
+    fetch, calls = _recording_fetch(None)
+    monkeypatch.setattr(feed_service_module, "fetch", fetch)
+
+    feed = await build_services(session).feed.get_or_create_stub(
+        "https://example.com/new.xml"
+    )
+
+    assert calls == []
+    assert feed.fetched == NEVER_FETCHED
+    assert feed.title is None
+
+
+async def test_get_or_create_stub_reuses_existing(session, monkeypatch):
+    """已经存在的源直接复用（同一个 URL 导入两次不会重复插）"""
+    fetch, _ = _recording_fetch(None)
+    monkeypatch.setattr(feed_service_module, "fetch", fetch)
+    services = build_services(session)
+
+    first = await services.feed.get_or_create_stub("https://example.com/new.xml")
+    second = await services.feed.get_or_create_stub("https://example.com/new.xml")
+
+    assert first.id == second.id
+
+
+async def test_get_or_create_stub_rejects_non_http_url(session, monkeypatch):
+    """不是 http(s) 就不入库：否则会种下一条永远抓不上、每轮都重试的订阅"""
+    fetch, _ = _recording_fetch(None)
+    monkeypatch.setattr(feed_service_module, "fetch", fetch)
+    services = build_services(session)
+
+    for bad in ("ftp://example.com/feed.xml", "example.com/feed.xml", ""):
+        with pytest.raises(ValueError, match="不是可抓取的 URL"):
+            await services.feed.get_or_create_stub(bad)

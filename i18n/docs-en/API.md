@@ -274,7 +274,11 @@ Returns OPML XML, grouped by folder.
 
 `POST /reader/api/0/subscription/import`
 
-Accepts OPML XML body, parses it, and imports feeds and folders. Folders are created automatically if they do not exist. **A feed that fails to import is skipped** (the rest are still imported); the response is `OK` either way.
+Accepts OPML XML body, parses it, and imports feeds and folders. Folders are created automatically if they do not exist.
+
+**Import only creates the records; it does not fetch anything** (same as FreshRSS): the import does not depend on the network, and a feed returning 403/503 cannot make a subscription go missing. Content is filled in by a background refresh that is triggered right away — new feeds are marked as "never fetched", so that round is guaranteed to pick them up. `title` comes from the OPML `title`/`text`; the feed's own title and icon only appear once it has been fetched.
+
+The response is still plain-text `OK` (no failure list); skipped entries are only in the server log.
 
 ---
 
