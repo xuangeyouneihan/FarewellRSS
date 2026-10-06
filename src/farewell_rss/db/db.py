@@ -1,5 +1,7 @@
 import logging
 import os
+import subprocess
+from getpass import getuser
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -25,6 +27,102 @@ def _enable_wal(dbapi_connection, connection_record):
 
 
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+
+def _restrict_to_owner(path: str, mode: int) -> None:
+    """POSIX：把权限收到「只有属主可访问」"""
+    try:
+        os.chmod(path, mode)
+    except OSError as error:
+        # 只读挂载、NFS、奇怪的卷驱动……：权限收不紧不该让启动失败，但要留痕
+        _logger.warning("无法收紧 %s 的权限：%s", path, error)
+
+
+# 用 SID 而不是名字：内置账号的名字是**本地化**的（中文 Windows 上 Users / Everyone
+# 可能显示成别的），这两个 SID 则是固定的。
+_SYSTEM_SID = "*S-1-5-18"
+_ADMINS_SID = "*S-1-5-32-544"
+
+
+def _restrict_windows_path(path: str, suffix: str) -> None:
+    """Windows：用 `icacls` 把 path 的 ACL 收成「当前账号 + SYSTEM + Administrators」
+
+    为什么不用 `os.chmod`：Windows 上它只能改「只读」那一位，**碰不到 ACL**。
+
+    现状是（实测）：默认位置（`%USERPROFILE%` 下）本来就只继承那三条 ACE、没有
+    `BUILTIN\\Users`，所以本机其他标准账号读不到。这一手是为 `FAREWELL_RSS_DATA_DIR`
+    指到共享位置准备的（D 盘根目录、被授予 Everyone 的目录、NAS/共享）。
+
+    `/inheritance:r` 会丢掉继承来的 ACE —— 包括父目录上管理员特意加的授权（比如备份
+    账号），所以成功时留一条 INFO，出问题时能查到是我们干的。
+    """
+    domain = os.environ.get("USERDOMAIN", "")
+    username = os.environ.get("USERNAME", "")
+    account = f"{domain}\\{username}" if domain and username else getuser()
+    grants = (_SYSTEM_SID, _ADMINS_SID, account)
+    command = [
+        "icacls",
+        path,
+        "/inheritance:r",
+        "/grant:r",
+        *(f"{grant}:{suffix}" for grant in grants),
+    ]
+    try:
+        # CREATE_NO_WINDOW：服务 /pythonw 下跑时不要弹黑框
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except OSError as error:
+        _logger.warning("无法收紧 %s 的 ACL：%s", path, error)
+        return
+    if result.returncode != 0:
+        _logger.warning(
+            "无法收紧 %s 的 ACL（icacls 退出码 %d，多半是 FAT/exFAT 卷或权限不足）：%s",
+            path,
+            result.returncode,
+            result.stderr.decode(errors="replace").strip(),
+        )
+        return
+    _logger.info("已把 %s 的访问权限收成「当前账号 + SYSTEM + Administrators」", path)
+
+
+def restrict_data_permissions() -> None:
+    """收紧数据目录（`0700` / 专属 ACL）与其中敏感文件（`0600` / 同）的权限，幂等
+
+    数据目录里有两样不该让同机其他账号看到的东西：
+
+    * `farewell_rss.db` —— `feeds.href` 可能带着**明文凭据**（`https://user:pass@…`）
+    * `.env` —— 签名 token 的 HMAC 密钥
+
+    POSIX 上默认 umask 会建出 `0644` / 目录 `0755`（世界可读）；Windows 的默认位置
+    （`%USERPROFILE%` 下）本来就是专属的，但 `FAREWELL_RSS_DATA_DIR` 指到共享位置时
+    不一定。两边都在启动时收一次，顺便把之前建出来的老文件一并收回来。
+    """
+    # -wal / -shm 是 WAL 模式的伴生文件，同样含数据（凭据可能还在 WAL 里）
+    names = (
+        "farewell_rss.db",
+        "farewell_rss.db-wal",
+        "farewell_rss.db-shm",
+        ".env",
+    )
+    if os.name == "nt":
+        # 目录带 (OI)(CI)：以后新建的库/env 会自动继承这一套 ACL（现有文件还得单独收）
+        if os.path.isdir(DATA_DIR):
+            _restrict_windows_path(DATA_DIR, "(OI)(CI)F")
+        for name in names:
+            path = os.path.join(DATA_DIR, name)
+            if os.path.exists(path):
+                _restrict_windows_path(path, "F")
+        return
+    if os.path.isdir(DATA_DIR):
+        _restrict_to_owner(DATA_DIR, 0o700)
+    for name in names:
+        path = os.path.join(DATA_DIR, name)
+        if os.path.exists(path):
+            _restrict_to_owner(path, 0o600)
 
 
 async def init_db() -> None:
@@ -145,6 +243,9 @@ async def init_db() -> None:
             END
         """)
         )
+
+    # 建表之后调（那时库文件才真的存在），把权限收回来
+    restrict_data_permissions()
 
 
 async def get_session():

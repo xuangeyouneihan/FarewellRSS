@@ -107,39 +107,83 @@ async def test_list_(session):
     assert set(result) == {feed1, feed2}
 
 
-async def test_upsert_insert(session):
-    """upsert 新 href 应插入新 Feed"""
+async def test_upsert_inserts_with_the_given_identity(session):
+    """upsert 的身份取**调用方给的 href**，而不是 `fetched.href`
+
+    真实里 `fetched.href` 是脱掉凭据、跟过重定向的地址；拿它当身份，带凭据的源就会
+    每轮都匹配不上（每轮新建一行，订阅那行永远是空的）。
+    """
     repo = FeedRepository(session)
 
-    fetched1 = FetchedFeed(
-        href="https://example.com/feed.xml",
+    fetched = FetchedFeed(
+        href="https://cdn.example.com/feed.xml",  # 与身份不同（模拟脱凭据 / 重定向）
         title="原始标题",
         ttl=60,
         fetched=datetime(1970, 1, 1, tzinfo=UTC),
     )
-    feed = await repo.upsert(fetched1)
-    feed_id = feed.id
+    feed = await repo.upsert(fetched, href="https://example.com/feed.xml")
 
     assert feed.id is not None
     assert feed.href == "https://example.com/feed.xml"
     assert feed.title == "原始标题"
+    assert await repo.get_by_href("https://example.com/feed.xml") is feed
+    assert await repo.get_by_href("https://cdn.example.com/feed.xml") is None
 
-    # 验证持久化
-    result1 = await repo.get_by_href("https://example.com/feed.xml")
-    assert result1 == feed
 
-    # 第二次 upsert，title 变了，ttl 不变
-    fetched2 = FetchedFeed(
-        href="https://example.com/feed.xml",
-        title="更新后的标题",
-        ttl=None,  # ttl 为 None 时不应覆盖
-        fetched=datetime(1970, 1, 2, tzinfo=UTC),
+async def test_upsert_updates_the_same_row(session):
+    """同一个 href 再来一次：更新原行；ttl=None 不覆盖原值"""
+    repo = FeedRepository(session)
+    href = "https://example.com/feed.xml"
+    feed = await repo.upsert(
+        FetchedFeed(
+            href=href,
+            title="原始标题",
+            ttl=60,
+            fetched=datetime(1970, 1, 1, tzinfo=UTC),
+        ),
+        href=href,
     )
-    updated = await repo.upsert(fetched2)
-    assert updated.id == feed_id
+
+    updated = await repo.upsert(
+        FetchedFeed(
+            href=href,
+            title="更新后的标题",
+            ttl=None,  # ttl 为 None 时不应覆盖
+            fetched=datetime(1970, 1, 2, tzinfo=UTC),
+        ),
+        href=href,
+    )
+
+    assert updated.id == feed.id
     assert updated.title == "更新后的标题"
     assert updated.ttl == 60  # 原值保留
     assert updated.fetched == datetime(1970, 1, 2, tzinfo=UTC)
+
+
+async def test_refresh_writes_into_the_given_row(session):
+    """refresh：按行写回；`fetched.href` 指向别处也不新建行、也不改身份"""
+    repo = FeedRepository(session)
+    feed = Feed(
+        href="https://example.com/feed.xml",
+        title="旧标题",
+        fetched=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    session.add(feed)
+    await session.commit()
+
+    updated = await repo.refresh(
+        feed,
+        FetchedFeed(
+            href="https://cdn.example.com/feed.xml",
+            title="新标题",
+            fetched=datetime(1970, 1, 2, tzinfo=UTC),
+        ),
+    )
+
+    assert updated is feed
+    assert updated.href == "https://example.com/feed.xml", "身份被改写了"
+    assert updated.title == "新标题"
+    assert await repo.get_by_href("https://cdn.example.com/feed.xml") is None
 
 
 async def test_delete(session):

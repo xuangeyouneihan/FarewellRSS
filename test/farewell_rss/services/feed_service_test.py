@@ -6,14 +6,15 @@ Last-Modified 只有秒级精度（同一秒内改内容，服务端 `mtime_sec 
 永远不更新 —— 所以这里钉住「周期性丢掉条件头全量抓一次」这条兜底。
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from farewell_rss.db.models import NEVER_FETCHED, Base, Feed
+from farewell_rss.db.models import NEVER_FETCHED, Base, Entry, Feed
 from farewell_rss.factory import build_services
 from farewell_rss.feed_fetcher.feed_fetcher import FetchedEntry, FetchedFeed
 from farewell_rss.services import feed as feed_service_module
@@ -204,3 +205,73 @@ async def test_get_or_create_stub_rejects_non_http_url(session, monkeypatch):
     for bad in ("ftp://example.com/feed.xml", "example.com/feed.xml", ""):
         with pytest.raises(ValueError, match="不是可抓取的 URL"):
             await services.feed.get_or_create_stub(bad)
+
+
+async def test_refresh_writes_into_the_row_it_was_given(session, monkeypatch):
+    """刷新**按行**写回，不用抓回来的 href 反查身份
+
+    带凭据的源是这条规则最直接的受害者：`fetch()` 返回的 href 是脱掉凭据（跟过重定向）
+    的地址，旧写法拿它去 upsert → 匹配不上 → **每轮刷新都新建一行**，而订阅指着的那
+    一行永远是空的。这里用「抓回来的地址 ≠ 库里那行」造出同样的局面。
+    """
+    stored_href = "http://user:secret@example.com/feed.xml"
+    feed = await _add_feed(session, href=stored_href, full_fetched=None)
+    result = FetchedFeed(
+        href="http://example.com/feed.xml",  # 脱掉凭据后的地址
+        title="源",
+        fetched=datetime.now(UTC),
+        entries=[FetchedEntry(guid="g1", title="新条目")],
+    )
+    fetch, _ = _recording_fetch(result)
+    monkeypatch.setattr(feed_service_module, "fetch", fetch)
+    services = build_services(session)
+
+    updated = await services.feed.update(feed)
+
+    assert updated is not None
+    assert updated.id == feed.id, "刷新跑到另一行去了"
+    assert updated.href == stored_href, "身份被 fetched.href 改写了"
+    assert await services.feed.get_by_href(stored_href) is updated
+    assert await services.feed.get_by_href(result.href) is None, "凭空多出一行"
+    # 条目要落在这（订阅指着的）一行上，否则用户永远看不到新内容
+    guids = await session.scalars(select(Entry.guid).where(Entry.feed_id == feed.id))
+    assert list(guids) == ["g1"]
+
+
+async def test_insert_by_href_normalizes_credentials(session, monkeypatch):
+    """同一份凭据的两种写法（`p@ss` / `p%40ss`）要折叠成同一个源
+
+    href 是订阅的去重键：不折叠就变成两行、各抓一遍，用户看到两条重复订阅。
+    """
+    result = FetchedFeed(href="http://example.com/feed.xml", title="源", fetched=_EPOCH)
+    fetch, _ = _recording_fetch(result)
+    monkeypatch.setattr(feed_service_module, "fetch", fetch)
+    services = build_services(session)
+
+    first = await services.feed.insert_by_href("http://u:p@ss@example.com/feed.xml")
+    second = await services.feed.insert_by_href("http://u:p%40ss@example.com/feed.xml")
+
+    assert first is not None
+    assert second is not None
+    assert first.id == second.id
+    assert first.href == "http://u:p%40ss@example.com/feed.xml"
+
+
+async def test_logs_never_carry_credentials(session, monkeypatch, caplog):
+    """日志里不能出现明文凭据
+
+    带凭据的 URL 本身就是「知道就能读到那行内容」的凭证，而日志经常被整段贴出来排障
+    （线上那份日志就是这么看的）。
+    """
+    caplog.set_level(logging.DEBUG, logger="farewell_rss")
+    result = FetchedFeed(href="http://example.com/feed.xml", title="源", fetched=_EPOCH)
+    fetch, _ = _recording_fetch(result)
+    monkeypatch.setattr(feed_service_module, "fetch", fetch)
+
+    await build_services(session).feed.insert_by_href(
+        "http://u:sup3rsecret@example.com/feed.xml"
+    )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "sup3rsecret" not in messages
+    assert "***@example.com" in messages

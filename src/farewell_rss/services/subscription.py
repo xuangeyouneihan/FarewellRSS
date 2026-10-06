@@ -2,6 +2,7 @@ import logging
 
 from ..db.models import Feed, Label, Subscription, User
 from ..db.repositories.subscription import SubscriptionRepository
+from ..feed_fetcher.feed_fetcher import redact_credentials
 from .feed import FeedService
 from .read_state import ReadStateService
 
@@ -57,7 +58,7 @@ class SubscriptionService:
             "用户 %s（%d）订阅源 %s，自定义标题：%s，副标题：%s，链接：%s，图标：%s，文件夹：%s，fetch：%s",
             user.username,
             user.id,
-            feed_href,
+            redact_credentials(feed_href),
             title,
             subtitle,
             link,

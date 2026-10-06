@@ -214,6 +214,8 @@ Same parameters as above; returns `{"itemRefs": [{"id": "..."}]}`.
 
 Item ID parsing is compatible with both the `tag:google.com,2005:reader/item/{hex}` format and plain decimal.
 
+**Visibility**: only items visible to the current user are returned — that is, items whose feed is in the current user's subscription list, or items for which the current user has their own read/starred record (starred items left behind after unsubscribing remain reachable). Others are silently ignored (no error; they simply do not appear in `items`). This prevents enumerating ids to read the body of entries from someone else's private feed.
+
 ### Categories Output
 
 Each entry returns a `categories` array:

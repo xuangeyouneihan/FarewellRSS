@@ -4,6 +4,10 @@
 所以这里同时断言热点查询的查询计划。
 """
 
+import os
+import subprocess
+
+import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -264,3 +268,138 @@ async def test_reading_list_stream_merges_via_feed_index(initialized_engine):
         assert not any(p.startswith("SCAN") for p in plan), (
             f"全局流出现了全表扫（多半是改成了 feed_id IN (...) + ix_entries_page）: {plan}"
         )
+
+
+# ─── 数据目录的权限（2026-10-06）────────────────────────────────────
+
+
+def test_restrict_data_permissions_tightens_dir_and_files(tmp_path, monkeypatch):
+    """POSIX：目录收 0700，库 / WAL / .env 收 0600
+
+    数据目录里有明文凭据（`feeds.href` 可能带 `user:pass@`）与签名密钥（`.env`），
+    默认 umask 下它们是 `0644`/`0755` —— 同机其他账号（或挂了同一个卷的另一台设备）
+    可以直接读。
+    """
+    monkeypatch.setattr(db_module.os, "name", "posix")
+    monkeypatch.setattr(db_module, "DATA_DIR", str(tmp_path))
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        db_module.os, "chmod", lambda path, mode: calls.append((path, mode))
+    )
+    for name in ("farewell_rss.db", "farewell_rss.db-wal", ".env"):
+        (tmp_path / name).write_text("x")
+
+    db_module.restrict_data_permissions()
+
+    # 不存在的 -shm 不碰；多收一个少收一个都会让这里不相等
+    assert dict(calls) == {
+        str(tmp_path): 0o700,
+        str(tmp_path / "farewell_rss.db"): 0o600,
+        str(tmp_path / "farewell_rss.db-wal"): 0o600,
+        str(tmp_path / ".env"): 0o600,
+    }
+
+
+def test_restrict_data_permissions_uses_icacls_on_windows(tmp_path, monkeypatch):
+    """Windows 上走 icacls（`os.chmod` 只能改只读位，碰不到 ACL）
+
+    命令形状就是「丢掉继承 + 只授给当前账号 / SYSTEM / Administrators」，内置账号用
+    SID 写（名字是本地化的，中文 Windows 上对不上）。
+    """
+    monkeypatch.setattr(db_module.os, "name", "nt")
+    # 非 Windows 主机上没这个常量，补一个让这条分支可测
+    monkeypatch.setattr(
+        db_module.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
+    )
+    monkeypatch.setattr(db_module, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        db_module.os, "chmod", lambda *args: pytest.fail("Windows 上不该调 chmod")
+    )
+    monkeypatch.setitem(db_module.os.environ, "USERDOMAIN", "MACHINE")
+    monkeypatch.setitem(db_module.os.environ, "USERNAME", "alice")
+    calls: list[list[str]] = []
+
+    def _run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stderr=b"")
+
+    monkeypatch.setattr(db_module.subprocess, "run", _run)
+    (tmp_path / "farewell_rss.db").write_text("x")
+
+    db_module.restrict_data_permissions()
+
+    dir_command, *file_commands = calls
+    assert dir_command == [
+        "icacls",
+        str(tmp_path),
+        "/inheritance:r",
+        "/grant:r",
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+        "MACHINE\\alice:(OI)(CI)F",
+    ]
+    # 现有文件不会被目录的 (OI)(CI) 追溯，得单独收（只有 -shm 不存在）
+    assert file_commands == [
+        [
+            "icacls",
+            str(tmp_path / "farewell_rss.db"),
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:F",
+            "*S-1-5-32-544:F",
+            "MACHINE\\alice:F",
+        ]
+    ]
+
+
+def test_restrict_data_permissions_survives_icacls_failure(
+    tmp_path, monkeypatch, caplog
+):
+    """icacls 失败（FAT/exFAT 卷、权限不足）只记 warning，不能让启动挂掉"""
+    monkeypatch.setattr(db_module.os, "name", "nt")
+    monkeypatch.setattr(db_module.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(db_module, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        db_module.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 5, stderr=b"Access is denied."
+        ),
+    )
+
+    db_module.restrict_data_permissions()
+
+    assert any("无法收紧" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="icacls 只在 Windows 上")
+def test_restrict_data_permissions_icacls_actually_works(tmp_path, monkeypatch, caplog):
+    """真跑一次 icacls：命令与参数在真机上确实能成功
+
+    失败路径只在记 warning（上面那条测过了），所以这里断言「一条 warning 都没有」。
+    不实际验「其他账号读不到」——那需要一个真实的第二个账号。
+    """
+    monkeypatch.setattr(db_module, "DATA_DIR", str(tmp_path))
+    (tmp_path / "farewell_rss.db").write_text("x")
+
+    db_module.restrict_data_permissions()
+
+    assert not [r for r in caplog.records if "无法收紧" in r.getMessage()]
+
+
+def test_restrict_data_permissions_survives_chmod_failure(
+    tmp_path, monkeypatch, caplog
+):
+    """收权限失败（只读挂载、NFS）只记一条 warning，不能让启动挂掉"""
+    monkeypatch.setattr(db_module.os, "name", "posix")
+    monkeypatch.setattr(db_module, "DATA_DIR", str(tmp_path))
+    (tmp_path / "farewell_rss.db").write_text("x")
+
+    def _raise(path, mode):
+        raise OSError("只读文件系统")
+
+    monkeypatch.setattr(db_module.os, "chmod", _raise)
+
+    db_module.restrict_data_permissions()
+
+    assert any("无法收紧" in record.getMessage() for record in caplog.records)

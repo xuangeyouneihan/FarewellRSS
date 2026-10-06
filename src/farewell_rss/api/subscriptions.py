@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, HTTPException, Response, status
 
 from ..db.models import LabelType, User
+from ..feed_fetcher.feed_fetcher import redact_credentials
 from ..services.feed import FeedService
 from ..services.label import LabelService
 from ..services.subscription import SubscriptionService
@@ -113,7 +114,7 @@ async def edit_subscription(
                     "用户 %s（%d）尝试订阅时，提供了无效的订阅 URL: %s",
                     user.username,
                     user.id,
-                    feeds,
+                    [redact_credentials(f) for f in feeds],
                 )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -142,7 +143,7 @@ async def edit_subscription(
                     "用户 %s（%d）尝试退订时，提供了无效的订阅 ID: %s",
                     user.username,
                     user.id,
-                    feeds,
+                    [redact_credentials(f) for f in feeds],
                 )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -164,7 +165,7 @@ async def edit_subscription(
                     "用户 %s（%d）尝试编辑订阅时，提供了无效的订阅 ID: %s",
                     user.username,
                     user.id,
-                    feeds,
+                    [redact_credentials(f) for f in feeds],
                 )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -232,7 +233,7 @@ async def quickadd_subscription(
             "用户 %s（%d）尝试快速添加订阅 %s 时，发生错误: %s",
             user.username,
             user.id,
-            quickadd,
+            redact_credentials(quickadd),
             e.detail,
         )
         error = {}
@@ -266,7 +267,7 @@ async def quickadd_subscription(
             "用户 %s（%d）尝试快速添加订阅 %s 时，发生未预期的错误",
             user.username,
             user.id,
-            quickadd,
+            redact_credentials(quickadd),
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -291,7 +292,7 @@ async def quickadd_subscription(
             "用户 %s（%d）快速添加订阅 %s 后未能确认订阅源，subscription=%s",
             user.username,
             user.id,
-            quickadd,
+            redact_credentials(quickadd),
             subscription,
         )
         raise HTTPException(

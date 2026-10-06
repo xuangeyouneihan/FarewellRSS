@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...feed_fetcher.feed_fetcher import FetchedFeed
+from ...feed_fetcher.feed_fetcher import FetchedFeed, redact_credentials
 from ..models import Feed
 from ._chunking import chunked
 from .entry import EntryRepository
@@ -33,7 +33,7 @@ class FeedRepository:
         return feeds
 
     async def get_by_href(self, href: str) -> Feed | None:
-        _logger.debug("按 href 查找订阅源: %s", href)
+        _logger.debug("按 href 查找订阅源: %s", redact_credentials(href))
         return await self._session.scalar(select(Feed).where(Feed.href == href))
 
     async def list_(self) -> list[Feed]:
@@ -41,65 +41,62 @@ class FeedRepository:
         result = await self._session.execute(select(Feed))
         return list(result.scalars().all())
 
-    async def upsert(self, feed: FetchedFeed) -> Feed:
-        result = await self.get_by_href(feed.href)
-        if result:
-            _logger.debug("更新订阅源 %d，href: %s", result.id, feed.href)
-            # 更新现有的 Feed
-            result.etag = feed.etag if feed.etag else result.etag
-            result.modified = feed.modified if feed.modified else result.modified
-            result.title = feed.title if feed.title else result.title
-            result.link = feed.link if feed.link else result.link
-            result.subtitle = feed.subtitle if feed.subtitle else result.subtitle
-            result.published = feed.published if feed.published else result.published
-            result.updated = feed.updated if feed.updated else result.updated
-            result.fetched = feed.fetched
-            result.full_fetched = feed.fetched
-            result.author_name = feed.author.name if feed.author else result.author_name
-            result.author_href = feed.author.href if feed.author else result.author_href
-            result.author_email = (
-                feed.author.email if feed.author else result.author_email
-            )
-            result.icon = feed.icon if feed.icon else result.icon
-            result.rights = feed.rights if feed.rights else result.rights
-            result.tags = (
-                str([tag.label or tag.term for tag in feed.tags])
-                if feed.tags
-                else result.tags
-            )
-            result.ttl = feed.ttl if feed.ttl is not None else result.ttl
-        else:
-            _logger.debug("插入订阅源，href: %s", feed.href)
-            # 插入新的 Feed
-            result = Feed(
-                href=feed.href,
-                etag=feed.etag,
-                modified=feed.modified,
-                title=feed.title,
-                link=feed.link,
-                subtitle=feed.subtitle,
-                published=feed.published,
-                updated=feed.updated,
-                fetched=feed.fetched,
-                full_fetched=feed.fetched,
-                author_name=feed.author.name if feed.author else None,
-                author_href=feed.author.href if feed.author else None,
-                author_email=feed.author.email if feed.author else None,
-                icon=feed.icon,
-                rights=feed.rights,
-                tags=str([tag.label or tag.term for tag in feed.tags])
-                if feed.tags
-                else None,
-                ttl=feed.ttl if feed.ttl is not None else None,
-            )
-            self._session.add(result)
-            await self._session.flush()
+    async def upsert(self, fetched: FetchedFeed, href: str | None = None) -> Feed:
+        """按 **href** 写入抓取结果：已有就更新，没有就新建（**订阅路径**）
 
-        await self._entry_repository.upsert_by_feed(result.id, feed.entries)
+        `href` 由调用方显式给出，而不是用 `fetched.href`：抓回来的 href 是**脱掉凭据、
+        跟过重定向**的地址，拿它当身份会让带凭据的源匹配不上——每轮刷新都新建一行，
+        而订阅指着的那一行永远是空的。身份只由「用户提交了什么」决定。
+        """
+        identity = href or fetched.href
+        feed = await self.get_by_href(identity)
+        if feed is None:
+            # 先建个只有身份的壳，字段统一交给 refresh 填（避免两处各写一遍字段表）
+            # 日志一律过 redact_credentials：万一以后有人把这里换成带凭据的身份串，
+            # 也不会把凭据写进日志
+            _logger.debug("插入订阅源，href: %s", redact_credentials(fetched.href))
+            feed = Feed(href=identity, fetched=fetched.fetched)
+            self._session.add(feed)
+            await self._session.flush()
+        return await self.refresh(feed, fetched)
+
+    async def refresh(self, feed: Feed, fetched: FetchedFeed) -> Feed:
+        """把抓取结果写回**已知的那一行**（**刷新路径**，按对象定位而不是按 href）
+
+        `href` 是这一行的身份，由创建它的那次订阅决定，这里一律不改它（重定向后的
+        最终地址只用于解析相对链接，见 `feed_fetcher.fetch`）。
+        """
+        _logger.debug(
+            "更新订阅源 %d，href: %s", feed.id, redact_credentials(fetched.href)
+        )
+        feed.etag = fetched.etag if fetched.etag else feed.etag
+        feed.modified = fetched.modified if fetched.modified else feed.modified
+        feed.title = fetched.title if fetched.title else feed.title
+        feed.link = fetched.link if fetched.link else feed.link
+        feed.subtitle = fetched.subtitle if fetched.subtitle else feed.subtitle
+        feed.published = fetched.published if fetched.published else feed.published
+        feed.updated = fetched.updated if fetched.updated else feed.updated
+        feed.fetched = fetched.fetched
+        feed.full_fetched = fetched.fetched
+        feed.author_name = fetched.author.name if fetched.author else feed.author_name
+        feed.author_href = fetched.author.href if fetched.author else feed.author_href
+        feed.author_email = (
+            fetched.author.email if fetched.author else feed.author_email
+        )
+        feed.icon = fetched.icon if fetched.icon else feed.icon
+        feed.rights = fetched.rights if fetched.rights else feed.rights
+        feed.tags = (
+            str([tag.label or tag.term for tag in fetched.tags])
+            if fetched.tags
+            else feed.tags
+        )
+        feed.ttl = fetched.ttl if fetched.ttl is not None else feed.ttl
+
+        await self._entry_repository.upsert_by_feed(feed.id, fetched.entries)
 
         await self._session.flush()
 
-        return result
+        return feed
 
     async def get_or_create_stub(self, href: str, fetched: datetime) -> Feed:
         """按 href 拿源；没有就建一条「还没抓过内容」的占位记录（**不抓取**）
@@ -112,9 +109,13 @@ class FeedRepository:
         """
         feed = await self.get_by_href(href)
         if feed:
-            _logger.debug("订阅源已存在 %d，复用，href: %s", feed.id, href)
+            _logger.debug(
+                "订阅源已存在 %d，复用，href: %s", feed.id, redact_credentials(href)
+            )
             return feed
-        _logger.debug("插入未抓取过的订阅源占位记录，href: %s", href)
+        _logger.debug(
+            "插入未抓取过的订阅源占位记录，href: %s", redact_credentials(href)
+        )
         feed = Feed(href=href, fetched=fetched)
         self._session.add(feed)
         await self._session.flush()

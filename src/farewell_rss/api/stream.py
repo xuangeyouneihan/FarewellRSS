@@ -318,6 +318,29 @@ async def _build_items(
     read_state_map = await read_state_service.get_batch(user, entries)
     star_state_map = await star_state_service.get_batch(user, entries)
 
+    # **可见性过滤**：只给「订阅了这个源」或「这个条目有自己的已读/收藏记录」的条目。
+    #
+    # 这里是非做不可的：`stream/items/contents` 收的是**任意 entry id**，而 id 是自增
+    # 整数（`tag:google.com,2005:reader/item/{entry.id:016x}` 就是它的十六进制）——
+    # 不校验的话，按 id 枚举就能读到别人私有源里的正文。
+    #
+    # 为什么不能只看订阅：starred / 已读历史里会有**退订后留下**的条目（prune_orphan_feeds
+    # 对有记录保护的条目会保留），那些是用户自己的数据，不该因为退订就取不回来。
+    visible = [
+        entry
+        for entry in entries
+        if entry.feed_id in subscription_map
+        or entry.id in read_state_map
+        or entry.id in star_state_map
+    ]
+    if len(visible) != len(entries):
+        _logger.debug(
+            "请求 %d 条条目，其中 %d 条不在该用户可见范围内，已跳过",
+            len(entries),
+            len(entries) - len(visible),
+        )
+    entries = visible
+
     items: list[dict] = []
     for entry in entries:
         feed = feed_map.get(entry.feed_id)

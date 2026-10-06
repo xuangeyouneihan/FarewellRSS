@@ -2,6 +2,7 @@ import base64
 import contextlib
 import gzip
 import http.server
+import logging
 import threading
 import time
 from datetime import UTC, datetime
@@ -27,6 +28,8 @@ from farewell_rss.feed_fetcher.feed_fetcher import (
     _strip_html,
     _to_html,
     fetch,
+    normalize_href,
+    redact_credentials,
 )
 
 # ─── RSS/Atom XML 测试数据 ───────────────────────────────────────────────
@@ -186,14 +189,59 @@ class TestSplitCredentials:
     def test_clean_url_keeps_path_query_and_fragment(self):
         """clean_url 只摘凭据，其余部分原样保留
 
-        它是 `FetchedFeed.href` 的来源，而 href 是订阅的去重键——被规范化改写就会凭空
-        多出一行 feed。
+        它只用来拼请求地址（身份由调用方给的 href 决定，见 `FeedService.insert_by_href`），
+        所以“原样”是故意的：不要把 URL 规范化掺进来。
         """
         clean, _ = _split_credentials(
             "https://user:pw@example.com:8443/a/Feed.xml?q=1#frag"
         )
 
         assert clean == "https://example.com:8443/a/Feed.xml?q=1#frag"
+
+
+class TestNormalizeHref:
+    def test_without_credentials_is_untouched(self):
+        url = "https://example.com/Feed.xml?q=1#frag"
+
+        assert normalize_href(url) == url
+
+    def test_credentials_are_percent_encoded(self):
+        """`p@ss` 与 `p%40ss` 折叠成同一个串（href 是去重键，不能两种写法两行）"""
+        expected = "http://u:p%40ss@example.com/feed"
+
+        assert normalize_href("http://u:p@ss@example.com/feed") == expected
+        assert normalize_href(expected) == expected
+        assert normalize_href("http://me%2Bfeeds:pw@example.com/feed") == (
+            "http://me%2Bfeeds:pw@example.com/feed"
+        )
+
+    def test_keeps_host_case_and_ipv6_brackets(self):
+        """除 userinfo 外一个字符都不动（不能用 parts.hostname 重建）"""
+        assert normalize_href("http://u:p@Example.COM:8443/Feed") == (
+            "http://u:p@Example.COM:8443/Feed"
+        )
+        assert normalize_href("http://u:p@[::1]:8080/feed") == (
+            "http://u:p@[::1]:8080/feed"
+        )
+
+    def test_unparsable_url_returns_as_is(self):
+        assert normalize_href("http://[::1/feed") == "http://[::1/feed"
+
+
+class TestRedactCredentials:
+    def test_replaces_userinfo(self):
+        assert redact_credentials("https://u:p@example.com/feed?q=1") == (
+            "https://***@example.com/feed?q=1"
+        )
+
+    def test_without_credentials_is_untouched(self):
+        url = "https://example.com/feed"
+
+        assert redact_credentials(url) == url
+
+    def test_unparsable_url_is_fully_masked(self):
+        """解析不了就整串打码：判断不出有没有凭据时，宁可少一条信息"""
+        assert redact_credentials("http://[::1/feed") == "***"
 
 
 # ─── fetch() 测试（真实 feedparser 解析）──────────────────────────────
@@ -592,3 +640,56 @@ class TestFetchTimeout:
             elapsed = time.monotonic() - started
 
         assert elapsed < 3, f"没按总时长放弃，等了 {elapsed:.1f} 秒"
+
+
+class TestInsecureCredentials:
+    """明文 HTTP + 凭据：只提醒，不拦；每条源只警告一次
+
+    Basic 认证就是把 `user:pass` 放进请求头，没有「先握手再加密凭据」这回事 —— 源站
+    不是 https 的话，同网络的任何设备都能读到。但内网 `http://192.168.x.x/feed` +
+    Basic 是常见的自托管配置，一刀切拒绝会伤到它。
+    """
+
+    @staticmethod
+    def _is_insecure_warning(record: logging.LogRecord) -> bool:
+        return "明文过网" in record.getMessage()
+
+    async def test_warns_once_for_plain_http_with_credentials(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(feed_fetcher_module, "_INSECURE_AUTH_WARNED", set())
+        caplog.set_level(logging.WARNING, logger="farewell_rss.feed_fetcher")
+
+        with _http_server(_rss_handler()) as base:
+            host = base.removeprefix("http://")
+            url = f"http://alice:s3cr3t@{host}/feed"
+            assert await fetch(url) is not None
+            assert await fetch(url) is not None  # 第二轮不该再警告
+
+        warnings = [
+            r.getMessage() for r in caplog.records if self._is_insecure_warning(r)
+        ]
+        assert len(warnings) == 1
+        assert "s3cr3t" not in warnings[0], "警告里不能带密码"
+
+    async def test_https_with_credentials_does_not_warn(self, monkeypatch, caplog):
+        """https 上凭据在 TLS 里，不该有这条警告"""
+        monkeypatch.setattr(feed_fetcher_module, "_INSECURE_AUTH_WARNED", set())
+        caplog.set_level(logging.WARNING, logger="farewell_rss.feed_fetcher")
+
+        with _patched_request(_stub_response()):
+            await fetch("https://alice:s3cr3t@example.com/feed.xml")
+
+        assert not [r for r in caplog.records if self._is_insecure_warning(r)]
+
+    async def test_plain_http_without_credentials_does_not_warn(
+        self, monkeypatch, caplog
+    ):
+        """没有凭据就无所谓明文（本来也没什么可泄露）"""
+        monkeypatch.setattr(feed_fetcher_module, "_INSECURE_AUTH_WARNED", set())
+        caplog.set_level(logging.WARNING, logger="farewell_rss.feed_fetcher")
+
+        with _patched_request(_stub_response()):
+            await fetch("http://example.com/feed.xml")
+
+        assert not [r for r in caplog.records if self._is_insecure_warning(r)]

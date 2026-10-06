@@ -5,7 +5,12 @@ from urllib.parse import urlparse
 
 from ..db.models import NEVER_FETCHED, Feed
 from ..db.repositories.feed import FeedRepository
-from ..feed_fetcher.feed_fetcher import FetchError, fetch
+from ..feed_fetcher.feed_fetcher import (
+    FetchError,
+    fetch,
+    normalize_href,
+    redact_credentials,
+)
 from .entry import EntryService
 
 _logger = logging.getLogger(__name__)
@@ -44,13 +49,17 @@ class FeedService:
         return await self._repository.list_()
 
     async def insert_by_href(self, href: str) -> Feed | None:
+        # 身份先规范化：`p@ss` 与 `p%40ss` 是同一个密码的两种写法，不折叠就会变成两行
+        href = normalize_href(href)
         try:
             feed = await fetch(href)
         except FetchError:
             return None
         if feed:
-            _logger.info("已从 %s 获取订阅源 %s", href, feed.title)
-            return await self._repository.upsert(feed)
+            _logger.info("已从 %s 获取订阅源 %s", redact_credentials(href), feed.title)
+            # 身份用**用户提交的 href**（可能带凭据），不是 `feed.href`——那是脱掉凭据、
+            # 跟过重定向的地址，拿它当身份会每次都匹配不上、每轮新建一行
+            return await self._repository.upsert(feed, href=href)
         # 此处不记日志，因为 feed_fetcher 那里已经记录了日志
         return None
 
@@ -64,6 +73,7 @@ class FeedService:
         URL 不像话直接报错（由调用方当作该条 outline 失败），免得种下一条永远失败、
         每轮都重试的订阅。
         """
+        href = normalize_href(href)
         if not _is_http_url(href):
             raise ValueError(f"不是可抓取的 URL: {href}")
         return await self._repository.get_or_create_stub(href, NEVER_FETCHED)
@@ -83,8 +93,8 @@ class FeedService:
             if full:
                 _logger.info(
                     "订阅源 %s（%s）距上次完整抓取已超过 %d 秒，本次不带条件头全量抓取",
-                    feed.title or feed.href,
-                    feed.href,
+                    feed.title or redact_credentials(feed.href),
+                    redact_credentials(feed.href),
                     _FULL_REFRESH_INTERVAL,
                 )
                 updated_feed = await fetch(feed.href)
@@ -96,8 +106,14 @@ class FeedService:
             # 网络失败：不更新时间戳，下一轮 TTL 后重试
             return None
         if updated_feed:
-            _logger.info("已更新订阅源 %s（%s）", updated_feed.title, updated_feed.href)
-            return await self._repository.upsert(updated_feed)
+            _logger.info(
+                "已更新订阅源 %s（%s）",
+                updated_feed.title,
+                redact_credentials(updated_feed.href),
+            )
+            # **按行**写回（拿对象定位，不用 href 反查）：href 是这一行的身份，不参与
+            # 匹配就不可能因为「脱掉凭据 / 跟过重定向」而变成另一行
+            return await self._repository.refresh(feed, updated_feed)
         # 304 未修改或没有条目：更新时间戳，避免反复请求
         await self._repository.touch(feed.id, full=full)
         return None

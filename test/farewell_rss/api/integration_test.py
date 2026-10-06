@@ -1245,6 +1245,65 @@ async def test_stream_filters_pagination_search_and_item_endpoints(client: Async
     assert "continuation" in r.json()
 
 
+async def test_items_contents_only_returns_visible_entries(client: AsyncClient):
+    """`stream/items/contents` 按 entry id 收，所以要校验可见性
+
+    条目 id 是自增整数（`tag:google.com,2005:reader/item/{id:016x}`），不校验的话按 id
+    枚举就能读到别人私有源里的正文。
+    """
+    alice = await _register(client, "items-alice")
+    await _subscribe(client, alice)
+    alice_items = await _title_to_id(client, alice)
+    assert len(alice_items) == 3
+
+    # Bob 什么都没订阅：别人的 id 一条都不给
+    bob = await _register(client, "items-bob")
+    r = await client.post(
+        f"{BASE}/stream/items/contents",
+        data={"i": list(alice_items.values())},
+        headers=bob,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["items"] == []
+
+    # Bob 订阅同一个（公共）源之后就能看到 —— 源是共享的，这是既有语义
+    await _subscribe(client, bob)
+    r = await client.post(
+        f"{BASE}/stream/items/contents",
+        data={"i": list(alice_items.values())},
+        headers=bob,
+    )
+    assert len(r.json()["items"]) == 3
+
+    # 收藏一条 → 退订 → 那条仍取得到（收藏是 Bob 自己的数据），其余取不到
+    starred = alice_items["《炒饭指南》第一章"]
+    other = alice_items["《炒饭指南》第二章"]
+    r = await client.post(
+        f"{BASE}/edit-tag",
+        data={"i": starred, "a": "user/-/state/com.google/starred"},
+        headers=bob,
+    )
+    assert r.status_code == 200, r.text
+    subscriptions = (await client.get(f"{BASE}/subscription/list", headers=bob)).json()[
+        "subscriptions"
+    ]
+    r = await client.post(
+        f"{BASE}/subscription/edit",
+        data={"ac": "unsubscribe", "s": subscriptions[0]["id"]},
+        headers=bob,
+    )
+    assert r.status_code == 200, r.text
+
+    r = await client.post(
+        f"{BASE}/stream/items/contents", data={"i": [starred]}, headers=bob
+    )
+    assert [item["id"] for item in r.json()["items"]] == [starred]
+    r = await client.post(
+        f"{BASE}/stream/items/contents", data={"i": [other]}, headers=bob
+    )
+    assert r.json()["items"] == []
+
+
 async def test_search_syntax_error_is_a_client_error(client: AsyncClient):
     """查询串本身有问题 → 400（用户少打一个引号不该算服务器故障）"""
     headers = await _register(client, "search-syntax-user")

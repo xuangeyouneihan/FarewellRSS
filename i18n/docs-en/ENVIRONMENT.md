@@ -92,3 +92,41 @@ docker run -e FAREWELL_RSS_DATA_DIR=/data \
 
 - **The secret (`FAREWELL_RSS_SECRET`) generally needs no attention**: It is auto-generated on first startup and persisted to `.env`, staying consistent across restarts. You only need to change it if you want to force all users to log in again.
 - **Admin-created users are unaffected by registration control**: Even with `FAREWELL_RSS_ALLOW_REGISTER=false` and an invite code configured, admins can still add users directly via `POST /accounts/CreateUser`. See the [API documentation](API.md) for details.
+
+## Credentials and data-directory permissions
+
+**Credentials embedded in a URL (`https://user:password@host/feed`) are stored in `feeds.href` as plain text.** That is deliberate:
+
+- The URL is both *the identity of the feed* (subscriptions are deduplicated by an **exact** href match: without the full URL you cannot match that row) and *the capability needed to fetch it*.
+- The GReader API offers URL as the only channel for credentials (`s=feed/<URL>` on `subscription/edit`, `quickadd`, OPML's `xmlUrl`) — and that is the only way clients send them.
+
+**What is guaranteed:**
+
+- Credentials **never reach the logs**: every log line replaces the userinfo with `***` (`https://***@host/feed`).
+- Credentials are **never echoed to other users**: `subscription/list` only returns the caller's own subscriptions, and subscribing requires an exact URL match — guessing the address cannot hit that row.
+- Nobody can piggyback on them: the same href with different credentials is **two** feed rows, fetched and isolated separately.
+
+**What is not guaranteed:**
+
+- To fetch feeds for you in the background, the server must be able to recover the plain text — so **the owner of a self-hosted instance (the admin) can, in principle, read the credentials in the database**: by reading the DB file, by reading process memory, or by resetting a user's password and then calling `subscription/list` as that user to obtain the full URL. This is not an implementation defect; it is a consequence of "the server fetches for you".
+- If you do not want the server to see the credentials at all, keep them out of it: use a token URL provided by the site, or run a proxy such as rss-bridge on your own side.
+
+**Transport (a different question from storage above):**
+
+- **This service → the feed's server**: with an `https://` feed the `Authorization` header travels inside TLS; with an `http://` feed it goes over the wire **in plain text** (inherent to Basic auth: `user:pass` must be placed in a request header, and there is no "handshake first, then encrypt the credentials" mechanism — any device on the network can read it). A WARNING is logged the first time such a feed is fetched, but it is **not** rejected — LAN feeds like `http://192.168.x.x/feed` with Basic auth are a common setup.
+- **Client → this service**: credentials travel in the POST body (not in the URL path or query string), so they do **not** end up in a reverse proxy's access log (which logs the request line by default). The whole tunnel **must be HTTPS** though: this service itself only listens on plain HTTP and relies on the proxy for TLS. With Cloudflare, make sure the SSL mode is `Full` / `Full (strict)` and **never `Flexible`** (Flexible leaves the Cloudflare-to-origin hop in plain text, exposing the credentials).
+
+**So permissions are tightened at startup (via `chmod` on POSIX and `icacls` on Windows):**
+
+| Object | Mode | Why |
+| --- | --- | --- |
+| Data directory | `0700` (Windows: a private ACL inherited by children) | Nothing inside is for anyone else |
+| `farewell_rss.db` (plus `-wal` / `-shm`) | `0600` | Contains plain-text credentials and every article |
+| `.env` | `0600` | Contains the HMAC key for auth tokens |
+
+Two notes for Windows:
+
+- The default location (under `%USERPROFILE%`) already inherits only `SYSTEM / Administrators / the current user`, so other *standard* local accounts cannot read it. But if you point `FAREWELL_RSS_DATA_DIR` at a shared place (a drive root, a folder granted to `Everyone`, a NAS), the inherited ACL may include `Users` / `Everyone` — so at startup the ACL of the directory and of the database/`.env` is reduced to "current account + `SYSTEM` + `Administrators`" (built-in accounts are written as SIDs, so localized names cannot mismatch). This drops permissions inherited from the parent, including ones an administrator added deliberately (a backup account, say) — if that is your setup, look for the `已把 … 收成…` line in the log.
+- ACLs only exist on NTFS; on FAT/exFAT `icacls` fails, which only produces a warning and never blocks startup.
+
+> **Do not share or back up `farewell_rss.db` on its own** (for example by pasting it while debugging) — it holds plain-text credentials and everything you have read. Share an empty or edited copy instead.

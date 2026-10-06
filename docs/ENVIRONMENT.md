@@ -92,3 +92,41 @@ docker run -e FAREWELL_RSS_DATA_DIR=/data \
 
 - **密钥（`FAREWELL_RSS_SECRET`）一般不用管**：首次启动自动生成并持久化到 `.env`，重启后保持一致。只有想强制所有用户重新登录时才需要改它。
 - **管理员创建用户不受注册控制影响**：即使 `FAREWELL_RSS_ALLOW_REGISTER=false`、配置了邀请码，管理员仍可通过 `POST /accounts/CreateUser` 直接加人。详见 [API 文档](API.md)。
+
+## 凭据与数据目录的权限
+
+**URL 里内嵌的凭据（`https://user:password@host/feed`）会以明文保存在 `feeds.href` 里**，这是刻意的：
+
+- 它同时是「这个源的身份」（订阅按 href **精确匹配**去重：不知道完整 URL 就命中不了那一行）与「抓取时需要的能力凭证」；
+- 而 GReader API 只提供 URL 这一个通道来传凭据（`subscription/edit` 的 `s=feed/<URL>`、`quickadd`、OPML 的 `xmlUrl`）—— 客户端也只会这么发。
+
+**能保证的：**
+
+- 凭据**不进日志**：所有日志都把 userinfo 换成 `***`（`https://***@host/feed`）。
+- 凭据**不回显给其他用户**：`subscription/list` 只返回调用者自己的订阅；订阅按完整 URL 精确匹配，别人猜不到就命中不了那一行。
+- 不会被别人「借道」：同一个 href 配不同凭据是**两行**源，各自抓取、各自隔离。
+
+**不能保证的：**
+
+- 服务端要替你后台抓取，就必须能还原出明文 —— 所以**自托管实例的所有者（管理员）在原理上可以看到库里的凭据**：读数据库文件、读进程内存，或改用户密码后冒充该用户调 `subscription/list` 拿回完整 URL。这不是实现缺陷，而是「服务端替你抓取」的必然后果。
+- 真正不想让服务端看到凭据时，正确做法是**让凭据不经过它**：改用源站提供的 token URL，或把 rss-bridge 之类的代理部署在自己那边。
+
+**传输（和上面的「存储」是两件事）：**
+
+- **本服务 → 源站**：源是 `https://` 时 `Authorization` 头在 TLS 里；源是 `http://` 时**明文过网**（Basic 认证的固有性质：`user:pass` 必须放进请求头，没有「先握手再加密凭据」这回事，同网络的任何设备都能读到）。抓到这种源会打一条 WARNING 提醒，但**不会拒绝**——内网 `http://192.168.x.x/feed` + Basic 是常见配置。
+- **客户端 → 本服务**：凭据在 POST 请求体里（不是 URL 路径/查询串），所以**不会进反向代理的 access log**（默认只记请求行）。但整条隧道**必须 HTTPS**：本服务自身只监听明文 HTTP，TLS 完全靠反代。若用 Cloudflare，SSL 模式务必是 `Full` / `Full (strict)`，**不能是 `Flexible`**（那样 CF 到源站是明文，凭据会裸奔）。
+
+**所以启动时会把权限收紧（POSIX 用 `chmod`，Windows 用 `icacls`）：**
+
+| 对象 | 权限 | 为什么 |
+| --- | --- | --- |
+| 数据目录 | `0700`（Windows：专属 ACL，子项继承） | 目录里所有东西都不对外 |
+| `farewell_rss.db`（含 `-wal` / `-shm`） | `0600` | 含明文凭据与所有正文 |
+| `.env` | `0600` | 含签名 token 的 HMAC 密钥 |
+
+Windows 补充两句：
+
+- 默认位置（`%USERPROFILE%` 下）本来就只继承 `SYSTEM / Administrators / 当前用户` 三条，本机其他标准账号读不到；但若把 `FAREWELL_RSS_DATA_DIR` 指到共享位置（盘根目录、被授予 `Everyone` 的目录、NAS），继承来的 ACL 可能带上 `Users` / `Everyone` —— 启动时会把目录与库/`.env` 的 ACL 收成「当前账号 + `SYSTEM` + `Administrators`」（内置账号用 SID 写，免得本地化的名字对不上）。这会丢掉父目录继承来的授权，包括管理员特意加的（比如备份账号）——若你有这种安排，看到日志里那条 `已把 … 收成…` 时请确认一下。
+- ACL 只在 NTFS 上有；FAT/exFAT 卷上 `icacls` 会失败，那种情况只记一条 warning，不影响启动。
+
+> **备份/分享时不要把 `farewell_rss.db` 单独发出去**（比如贴出来排查问题）——它里面有明文凭据，以及你读过的全部文章。要分享的话先换成空库或先编辑过。

@@ -56,6 +56,35 @@ class FetchError(Exception):
     """RSS 源抓取失败（网络错误等）"""
 
 
+# 已经为「明文 HTTP + 凭据」警告过的源（用**脱敏后**的 URL 当键，免得凭据进内存）。
+# 每轮刷新都会发同一个源，不记一下就会每 15 分钟刷一行同样的警告。
+_INSECURE_AUTH_WARNED: set[str] = set()
+
+# 上限只是为了别让一个坏调用方把内存吃光：到顶就清空重来（顶多再警告一遍）
+_INSECURE_AUTH_WARNED_MAX = 1000
+
+
+def _warn_insecure_credentials(url: str) -> None:
+    """给 `http://` 的源发凭据之前，提醒一次「这是明文过网」
+
+    Basic 认证就是要把 `user:pass` 放进请求头，没有任何"先握手再加密凭据"的机制，
+    所以源站只能给 https 时才能保证中间人（同一个 Wi-Fi、运营商、透明代理）读不到。
+    而内网 `http://192.168.x.x:8080/feed` + Basic 是常见的自托管配置，一刀切拒绝会
+    伤到它，所以这里只提醒不拦。
+    """
+    key = redact_credentials(url)
+    if key in _INSECURE_AUTH_WARNED:
+        return
+    if len(_INSECURE_AUTH_WARNED) >= _INSECURE_AUTH_WARNED_MAX:
+        _INSECURE_AUTH_WARNED.clear()
+    _INSECURE_AUTH_WARNED.add(key)
+    _logger.warning(
+        "订阅源 %s 使用明文 HTTP 且带了凭据：Authorization 头会以明文过网（同网络的其他"
+        "设备可以读到）。建议改用 https，或换成源站提供的 token URL",
+        key,
+    )
+
+
 def _split_credentials(url: str) -> tuple[str, str | None]:
     """URL 里的 `user:pass@` 拆成「干净的 URL + Authorization 头」
 
@@ -87,6 +116,67 @@ def _split_credentials(url: str) -> tuple[str, str | None]:
     return clean, f"Basic {token}"
 
 
+def _hostinfo(netloc: str) -> str:
+    """netloc 里去掉 userinfo 的那部分
+
+    用 netloc 而不是 `parts.hostname`：后者会把主机名小写化，还会吞掉 IPv6 的方括号
+    （`http://[::1]:8080` → `::1`），重建出来的 URL 是坏的。
+    """
+    return netloc.rpartition("@")[2]
+
+
+def normalize_href(url: str) -> str:
+    """把用户提交的 URL 规范化成「身份形态」：凭据的百分号编码统一成一种写法
+
+    `p@ss` 与 `p%40ss` 是**同一个密码的两种写法**，而 href 是订阅的去重键 —— 不折叠
+    起来就会变成两行源、各抓一遍。除 userinfo 外一个字符都不动（主机名大小写、路径、
+    IPv6 方括号都原样保留），没凭据时原样返回。
+
+    `quote(unquote(x))` 是刻意的：`unquote` 化掉「用户/客户端那一层」的写法差异，
+    `quote` 再按 RFC 3986 的规范形式编码一次。
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        # 解析不了就原样返回，让抓取那一步去报「地址不合法」，这里不做判断
+        return url
+    if parts.username is None:
+        return url
+    credentials = urllib.parse.quote(urllib.parse.unquote(parts.username), safe="")
+    if parts.password is not None:
+        password = urllib.parse.quote(urllib.parse.unquote(parts.password), safe="")
+        credentials = f"{credentials}:{password}"
+    return urllib.parse.urlunsplit((
+        parts.scheme,
+        f"{credentials}@{_hostinfo(parts.netloc)}",
+        parts.path,
+        parts.query,
+        parts.fragment,
+    ))
+
+
+def redact_credentials(url: str) -> str:
+    """把 URL 里的凭据换成 `***`，**只给日志用**
+
+    `https://u:p@host/feed` → `https://***@host/feed`。带凭据的 URL 本身就是「知道就能
+    读到那行内容」的凭证，而日志经常被整段贴出来排障 —— 这是最容易漏出去的一环。
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        # 判断不出有没有凭据时，宁可少一条信息
+        return "***"
+    if parts.username is None:
+        return url
+    return urllib.parse.urlunsplit((
+        parts.scheme,
+        f"***@{_hostinfo(parts.netloc)}",
+        parts.path,
+        parts.query,
+        parts.fragment,
+    ))
+
+
 async def _request(
     url: str, authorization: str | None, etag: str | None, modified: str | None
 ) -> httpx.Response:
@@ -115,10 +205,10 @@ async def _request(
         ) as client:
             return await client.get(url, headers=headers)
     except httpx.TimeoutException as error:
-        _logger.warning("订阅源 %s 抓取超时：%s", url, error)
+        _logger.warning("订阅源 %s 抓取超时：%s", redact_credentials(url), error)
         raise FetchError(url) from error
     except (httpx.HTTPError, httpx.InvalidURL) as error:
-        _logger.warning("订阅源 %s 抓取失败：%s", url, error)
+        _logger.warning("订阅源 %s 抓取失败：%s", redact_credentials(url), error)
         raise FetchError(url) from error
 
 
@@ -315,8 +405,12 @@ async def fetch(
     except ValueError as error:
         # 比如 `http://host:不是端口/feed`：`_is_http_url` 拦不住（urlparse 不校验端口），
         # 到取 port 时才炸。按抓取失败处理，别让它变成每轮一条未捕获异常。
-        _logger.warning("订阅源 %s 地址不合法：%s", url, error)
+        _logger.warning("订阅源 %s 地址不合法：%s", redact_credentials(url), error)
         raise FetchError(url) from error
+
+    # 凭据 + 明文 HTTP：会以明文过网，只提醒不拦（内网 http 源是常见配置）
+    if authorization and clean_url.startswith("http://"):
+        _warn_insecure_credentials(url)
 
     try:
         # 整次抓取的硬上限：httpx 的 read 超时只约束「每次读」，两次读之间可以无限长
@@ -324,14 +418,16 @@ async def fetch(
             response = await _request(clean_url, authorization, etag, modified)
     except TimeoutError as error:
         _logger.warning(
-            "订阅源 %s 超过 %.0f 秒仍未抓完，放弃本次抓取", url, FETCH_TIMEOUT
+            "订阅源 %s 超过 %.0f 秒仍未抓完，放弃本次抓取",
+            redact_credentials(url),
+            FETCH_TIMEOUT,
         )
         raise FetchError(url) from error
 
     status = response.status_code
     headers = dict(response.headers)  # httpcore 已经全小写了
     if status == 304:
-        _logger.debug("订阅源 %s 未修改", url)
+        _logger.debug("订阅源 %s 未修改", redact_credentials(url))
         return None
     if not 200 <= status < 300:
         # 403（WAF / 防盗链）、404（源已失效）、5xx（上游故障）：错误页也能解析出「零条目」，
@@ -342,7 +438,7 @@ async def fetch(
         # touch()。
         _logger.warning(
             "订阅源 %s 返回 HTTP %d（content-type: %s），本次抓取失败",
-            url,
+            redact_credentials(url),
             status,
             headers.get("content-type"),
         )
@@ -360,7 +456,9 @@ async def fetch(
     if raw_feed.bozo and raw_feed.entries:
         # 有条目还能解析出来：宽进严出，照常返回，只留一条警告
         _logger.warning(
-            "订阅源 %s 解析异常，bozo_exception: %s", url, raw_feed.bozo_exception
+            "订阅源 %s 解析异常，bozo_exception: %s",
+            redact_credentials(url),
+            raw_feed.bozo_exception,
         )
     if not raw_feed.entries:
         if raw_feed.bozo:
@@ -368,11 +466,11 @@ async def fetch(
             # 与「源本身是空的」是两回事，日志要能分辨。
             _logger.warning(
                 "订阅源 %s 没有条目，且解析异常（content-type: %s）：拿到的可能不是 feed",
-                url,
+                redact_credentials(url),
                 headers.get("content-type"),
             )
         else:
-            _logger.info("订阅源 %s 没有条目", url)
+            _logger.info("订阅源 %s 没有条目", redact_credentials(url))
         return None
 
     feed_title = None
@@ -495,5 +593,7 @@ async def fetch(
             )
         )
 
-    _logger.debug("订阅源 %s 抓取完成，共 %d 条", url, len(result.entries))
+    _logger.debug(
+        "订阅源 %s 抓取完成，共 %d 条", redact_credentials(url), len(result.entries)
+    )
     return result
