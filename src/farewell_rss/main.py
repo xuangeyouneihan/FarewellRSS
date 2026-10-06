@@ -8,6 +8,26 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 
+_LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+
+
+def _log_level() -> str:
+    """本项目 logger 的级别（`FAREWELL_RSS_LOG_LEVEL`，默认 INFO）
+
+    写错值时退回 INFO 并说一声：启动不该因为一个日志变量炸掉（`dictConfig` 收到不认识
+    的级别会直接抛 ValueError）。
+
+    只影响 `farewell_rss.*`：uvicorn 自己的日志（含 access log）保持 INFO —— 客户端
+    请求了哪条 URL、状态码多少，本来就看得见。
+    """
+    level = os.getenv("FAREWELL_RSS_LOG_LEVEL", "INFO").strip().upper()
+    if level in _LOG_LEVELS:
+        return level
+    logging.getLogger(__name__).warning(
+        "未知的日志级别 %r，按 INFO 处理（可选：%s）", level, "/".join(_LOG_LEVELS)
+    )
+    return "INFO"
+
 
 def _env_clean_os_overrides(path: str, os_keys: set[str]) -> None:
     """删除 .env 里所有已经被 OS 环境变量覆盖的条目"""
@@ -189,7 +209,7 @@ def main() -> None:
             },
         },
         "loggers": {
-            "farewell_rss": {"level": "INFO"},
+            "farewell_rss": {"level": _log_level()},
             "uvicorn": {"level": "INFO"},
         },
         "root": {"level": "WARNING", "handlers": ["default"]},

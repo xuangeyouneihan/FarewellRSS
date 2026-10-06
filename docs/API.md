@@ -196,6 +196,8 @@
 >
 > **时间范围说明**：`ot`/`nt` 的比较也在秒级、且都是闭区间（`有效时间戳 >= ot` 且 `<= nt`）；注意 `nt` 涵盖**整个第 `nt` 秒**。微秒不参与排序和分页，只出现在 item 的 `crawlTimeMsec` / `timestampUsec` 两个展示字段里。
 >
+> **`updated` 是整秒**：`stream/contents` 和 `stream/items/contents` 顶层的 `updated` 是 Unix **整数**秒（FreshRSS 发的是 `time()`）。**别写成浮点**：Gson 系客户端（ReadYou 等）把它按 `Long` 解析，带小数点会直接抛 `Expected a long but was …`，整个同步因此失败 —— 而服务端这边看起来只是「200，一切正常」（实测：客户端每轮 sync 都会重登 + 重发同一批 id，最后一篇文章都存不进去）。
+>
 > **与 Google Reader 和 FreshRSS 的差异**：continuation 使用 hex 格式（Google Reader 标准），FreshRSS 使用十进制；告别 RSS 采用 hex，并额外携带「时间戳 + id」复合锚点。告别 RSS 新增搜索流以支持全文搜索。
 
 ### stream/items/ids
@@ -212,7 +214,7 @@
 | ----- | ------------------------------------ |
 | `i` | 条目 ID（可重复，支持 hex 和十进制） |
 
-条目 ID 解析兼容 `tag:google.com,2005:reader/item/{hex}` 和纯十进制两种格式。
+条目 ID 解析兼容三种写法（对齐 FreshRSS）：`tag:google.com,2005:reader/item/{hex}` 长格式、**不带前缀的 16 位 hex**（`000000000000001c`，Reeder 就用这种）、以及纯十进制（Google Reader 的 short form，ReadYou 用这种）。全数字且不以 `0` 开头的才算十进制 —— 与 FreshRSS 的 `hex2dec(basename($e_id))` 同一条规则。
 
 **可见性**：只返回当前用户可见的条目 —— 即该条目所属的源在当前用户的订阅列表里，或该条目有当前用户自己的已读/收藏记录（退订后留下的收藏条目仍能取回）。其余条目会被静默忽略（不报错，只是不出现在 `items` 里）。这样按 id 枚举无法读到别人私有源里的正文。
 

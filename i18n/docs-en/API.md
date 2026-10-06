@@ -196,6 +196,8 @@ Supported stream paths:
 >
 > **About the time range**: `ot`/`nt` are also compared at second granularity and both are inclusive (`effective timestamp >= ot` and `<= nt`); note that `nt` covers the **entire `nt`-th second**. Microseconds take no part in sorting or pagination — they only appear in the item's `crawlTimeMsec` / `timestampUsec` display fields.
 >
+> **`updated` must be whole seconds**: the top-level `updated` of `stream/contents` and `stream/items/contents` is a Unix timestamp in **integer** seconds (FreshRSS sends `time()`). **Never emit a fractional value**: Gson-based clients (ReadYou and friends) parse it as a `Long` and a decimal point makes them throw `Expected a long but was …`, failing the whole sync — while on the server side it merely looks like "200, everything fine" (measured: the client re-authenticated and re-posted the same ids on every sync attempt, and never stored a single article).
+>
 > **Differences from Google Reader and FreshRSS**: The continuation uses hex format (the Google Reader standard), while FreshRSS uses decimal; FarewellRSS adopts hex and additionally carries a "timestamp + id" compound anchor. FarewellRSS adds the search stream to support full-text search.
 
 ### stream/items/ids
@@ -212,7 +214,7 @@ Same parameters as above; returns `{"itemRefs": [{"id": "..."}]}`.
 | --------- | ------------------------------------ |
 | `i`     | Item ID (repeatable; supports hex and decimal) |
 
-Item ID parsing is compatible with both the `tag:google.com,2005:reader/item/{hex}` format and plain decimal.
+Item ids are accepted in three forms (matching FreshRSS): the long `tag:google.com,2005:reader/item/{hex}` form, a **bare 16-digit hex string without the prefix** (`000000000000001c` — what Reeder sends), and plain decimal (Google Reader's short form — what ReadYou sends). Only strings that are all digits **and do not start with `0`** are read as decimal, the same rule as FreshRSS's `hex2dec(basename($e_id))`.
 
 **Visibility**: only items visible to the current user are returned — that is, items whose feed is in the current user's subscription list, or items for which the current user has their own read/starred record (starred items left behind after unsubscribing remain reachable). Others are silently ignored (no error; they simply do not appear in `items`). This prevents enumerating ids to read the body of entries from someone else's private feed.
 

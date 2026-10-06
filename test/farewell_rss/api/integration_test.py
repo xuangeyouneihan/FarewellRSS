@@ -1179,6 +1179,8 @@ async def test_stream_filters_pagination_search_and_item_endpoints(client: Async
         r = await client.get(f"{BASE}/stream/contents/{stream_id}", headers=headers)
         assert r.status_code == 200, r.text
         assert {item["title"] for item in r.json()["items"]} == expected_titles
+        # 顶层 `updated` 是整秒（浮点会让 Gson 客户端解析抛异常，见 items/contents 那条）
+        assert isinstance(r.json()["updated"], int), r.json()["updated"]
 
     r = await client.get(
         f"{BASE}/stream/contents/user/-/state/com.google/reading-list",
@@ -1235,6 +1237,22 @@ async def test_stream_filters_pagination_search_and_item_endpoints(client: Async
     assert all(
         item["origin"]["streamId"].startswith("feed/") for item in r.json()["items"]
     )
+    # `updated` 必须是**整秒**：Python 的 time() 是浮点，带小数点的数字会被 Gson 按 Long
+    # 解析时直接抛异常（ReadYou 就是这样：我们回 200、字段全对，它每轮 sync 却全失败）。
+    # Python 的 json 会把 1791284278.015 解析成 float、把 1791284278 解析成 int，所以这条
+    # 断言正好卡住这个 bug。
+    assert isinstance(r.json()["updated"], int), r.json()["updated"]
+
+    # Reeder 回传条目 id 时发的是**不带 `tag:google.com,2005:reader/item/` 前缀的 16 位
+    # hex**：以前这条会回 400，然后它就陷入重试，一篇文章都同步不出来（FreshRSS 因为用
+    # `hex2dec(basename($e_id))` 而天然容忍）。
+    r = await client.post(
+        f"{BASE}/stream/items/contents",
+        data={"i": [f"{int(item_id):016x}" for item_id in item_ids]},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["items"]) == 2
 
     r = await client.get(
         f"{BASE}/stream/contents/user/-/state/com.google/reading-list",

@@ -30,6 +30,19 @@ from .deps import (
 
 _logger = logging.getLogger(__name__)
 
+
+def _now() -> int:
+    """当前时间（**整秒**）
+
+    `updated` 是 Unix 秒，规范里是整数：FreshRSS 发的是 `time()`。这里必须 `int()` 掉
+    小数部分 —— Python 的 `time()` 是浮点，带小数点的数字会被 Gson 按 `Long` 解析时
+    **直接抛异常**（`Expected a long but was 1791284278.015`），而客户端的重试逻辑会把它
+    当成「这个请求失败了」：实测 ReadYou 就是这样 —— 我们每次都回 200、字段全对，但它
+    每轮 sync 都在重登 + 重发同一批 id，最后一篇文章都存不进去。
+    """
+    return int(time())
+
+
 FILTERING_MAP = {
     "user/-/state/com.google/read": Filtering.READ,
     "user/-/state/com.google/unread": Filtering.UNREAD,
@@ -447,7 +460,7 @@ async def stream_contents(
         read_state_service,
         star_state_service,
     )
-    result: dict = {"id": s, "updated": time(), "items": items}
+    result: dict = {"id": s, "updated": _now(), "items": items}
     if continuation:
         result["continuation"] = continuation
     return result
@@ -520,6 +533,17 @@ async def stream_items_contents(
     entry_ids = parse_item_ids(i)
     entry_map = await entry_service.get_batch(entry_ids)
     entries = [e for eid in entry_ids if (e := entry_map.get(eid)) is not None]
+    # 客户端「拿不到文章」时，这一行能把问题分到三段中的哪一段：
+    #   收到 N 个 / 解析出 M 个（差集 → `i` 的格式不认）
+    #   命中 K 条（差集 → 这些 id 在库里根本不存在）
+    #   再往下被可见性过滤掉的条数，由 `_build_items` 那条 debug 解释
+    _logger.debug(
+        "stream/items/contents：收到 %d 个 id，解析出 %d 个，命中 %d 条条目，样例 %s",
+        len(i),
+        len(entry_ids),
+        len(entries),
+        [f"{entry_id:016x}" for entry_id in entry_ids[:5]],
+    )
     items = await _build_items(
         entries,
         user,
@@ -531,6 +555,6 @@ async def stream_items_contents(
     )
     return {
         "id": "user/-/state/com.google/reading-list",
-        "updated": time(),
+        "updated": _now(),
         "items": items,
     }

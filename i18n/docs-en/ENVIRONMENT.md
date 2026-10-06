@@ -23,6 +23,14 @@ OS environment variables  >  .env file in the data directory
 | `FAREWELL_RSS_HOST`     | `0.0.0.0`               | Listen address.                                                                                                                                              |
 | `FAREWELL_RSS_PORT`     | `3000`                  | Listen port. Under Docker this is the **container-internal** port; external access is mapped via `docker run -p host:container` (or compose `ports`), and the two must match. |
 
+### Logging
+
+| Variable                  | Default | Description                                                                                                                                     |
+| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FAREWELL_RSS_LOG_LEVEL` | `INFO`  | Log level of `farewell_rss.*`: `CRITICAL` / `ERROR` / `WARNING` / `INFO` / `DEBUG` (case-insensitive). Any other value falls back to `INFO` with a warning. **Does not affect** uvicorn's own loggers (access log included — that is INFO already). |
+
+`DEBUG` prints every batched query, every stream's visibility filtering, and every fetch in detail (dozens of lines per list request), so keep it on only while troubleshooting.
+
 ### Registration Control
 
 | Variable                        | Default      | Description                                                                                                                                        |
