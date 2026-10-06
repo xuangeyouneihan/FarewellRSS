@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Response, status
 
 from ..db.models import LabelType, User
 from ..feed_fetcher.feed_fetcher import redact_credentials
+from ..services.exceptions import FeedFetchFailedError
 from ..services.feed import FeedService
 from ..services.label import LabelService
 from ..services.subscription import SubscriptionService
@@ -59,7 +60,9 @@ async def list_subscriptions(
         )
         results.append({
             "id": f"feed/{subscription.feed_id}",
-            "title": subscription.title or feed.title or "",
+            # 还没有源标题时退回 URL（新增订阅会在首次抓取失败时先建占位记录，那时
+            # 两边都是空的）—— 空白一行比一串 URL 更难用。
+            "title": subscription.title or feed.title or feed.href,
             "categories": [{"id": f"user/-/label/{label.name}", "label": label.name}]
             if label
             else [],
@@ -131,12 +134,21 @@ async def edit_subscription(
             for i in range(len(feeds)):
                 feed_href = feeds[i]
                 title = ts[i] if i < len(ts) and ts[i] else None
-                await subscription_service.subscribe(
-                    user=user,
-                    feed_href=feed_href,
-                    title=title,
-                    folder_id=label.id if label else None,
-                )
+                try:
+                    await subscription_service.subscribe(
+                        user=user,
+                        feed_href=feed_href,
+                        title=title,
+                        folder_id=label.id if label else None,
+                    )
+                except FeedFetchFailedError as error:
+                    # 4xx / 抓不到内容：重试不会变好，当场报错。
+                    # 注意这里是批量订阅：一条永久失败就让整个请求失败（网络层的临时
+                    # 失败不会走到这里 —— subscribe 会把订阅先建起来）。
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail={"code": "FeedFetchFailed", "detail": str(error)},
+                    ) from error
         case _SubscriptionEditAction.UNSUBSCRIBE:
             if not all(f.isnumeric() for f in feeds):
                 _logger.warning(
@@ -224,10 +236,19 @@ async def quickadd_subscription(
             )
         # 直接订阅并拿回 Subscription；不要用原始 URL 反查，feedparser 解析出的
         # href 可能是重定向后的最终地址，与用户输入不一致
-        subscription = await subscription_service.subscribe(
-            user=user,
-            feed_href=quickadd,
-        )
+        try:
+            subscription = await subscription_service.subscribe(
+                user=user,
+                feed_href=quickadd,
+            )
+        except FeedFetchFailedError as failure:
+            # 地址错 / 被拒 / 抓不到内容（重试也不会好的那类）——转成 Google Reader
+            # 那句 numResults: 0 的错误载荷；网络层临时失败不会到这里，那时订阅已经
+            # 建好了（内容交给调度器），见 SubscriptionService.subscribe
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"code": "FeedFetchFailed", "detail": str(failure)},
+            ) from failure
     except HTTPException as e:
         _logger.warning(
             "用户 %s（%d）尝试快速添加订阅 %s 时，发生错误: %s",

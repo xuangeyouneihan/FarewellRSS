@@ -70,10 +70,32 @@ async function request(
     clearToken()
   }
   if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`请求失败 ${response.status}: ${url} — ${detail}`)
+    throw new Error(await errorMessage(response, url))
   }
   return response
+}
+
+/**
+ * 错误响应 → 一句能给人看的话。
+ *
+ * 后端至少三种形状：`{detail: {numResults, error: {code, detail}}}`（quickadd /
+ * subscription edit）、`{detail: {code, detail}}`（其余端点）、`{detail: "…"}`
+ * （FastAPI 默认）。抠不出来就退回原始文本——排查时还得看得到状态码和 URL。
+ */
+async function errorMessage(response: Response, url: string): Promise<string> {
+  const text = await response.text()
+  try {
+    const detail = (JSON.parse(text) as { detail?: unknown }).detail
+    if (typeof detail === "string") return detail
+    if (detail !== null && typeof detail === "object") {
+      const nested = detail as { detail?: unknown; error?: { detail?: unknown } }
+      if (typeof nested.detail === "string") return nested.detail
+      if (typeof nested.error?.detail === "string") return nested.error.detail
+    }
+  } catch {
+    // 不是 JSON：按原文
+  }
+  return `请求失败 ${response.status}: ${url} — ${text}`
 }
 
 // ─── 认证 ───────────────────────────────────────────────────────────────

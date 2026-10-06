@@ -315,6 +315,19 @@
 | ------------ | -------- |
 | `quickadd` | feed URL |
 
+成功：`{"numResults": 1, "query": "<源 URL>", "streamId": "feed/<id>", "streamName": "<标题>"}`。
+
+**抓取失败时的语义**（订阅是交互式的，所以会当场抓一次拿标题/图标）：
+
+- **网络层失败（超时/DNS/TLS）与 5xx/429** —— 上游「现在不行」，**订阅照建**（内容交给后台刷新，占位记录的 `fetched` 早于任何 TTL，下一轮必然被挑中）。此时 `streamName` 可能是空串，列表里该源的名字会退回显示 URL，直到首次抓到标题。这样做的理由：慢源 / 不稳的链路（实测同一个 1 MB 的源，经代理有时 4.7 秒抓到、有时 14 秒超时）不该让用户反复手点重试。
+- **4xx（403 被 WAF 拒 / 404 源已失效 / 410 已删）与「抓到了但没有条目」** —— 那是地址不对或源已废，重试也不会变好：返回 **502**，错误体是 Google Reader 那句 `numResults: 0` 形状：
+
+  ```json
+  { "detail": { "numResults": 0, "error": { "code": "FeedFetchFailed", "detail": "无法订阅 <URL>：对方返回 HTTP 404" } } }
+  ```
+
+  此时**不会**创建订阅。（`subscription/edit` 的 `ac=subscribe` 走同一套逻辑；它是批量订阅，一条永久失败会让整个请求失败。）
+
 ### subscription/export
 
 `GET /reader/api/0/subscription/export`

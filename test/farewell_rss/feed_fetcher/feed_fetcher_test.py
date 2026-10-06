@@ -424,8 +424,12 @@ class TestFetchEdgeCases:
         连 status 都不设」来识别它（修之前还会先抛 AttributeError，把网络失败伪装成
         代码 bug）；这里连一个没人监听的端口，走的是 httpx 的 ConnectError。
         """
-        with pytest.raises(FetchError):
+        with pytest.raises(FetchError) as error:
             await fetch("http://127.0.0.1:1/feed")
+
+        # 没到 HTTP 层（status 为 None），且算「稍后重试可能就好」
+        assert error.value.status is None
+        assert error.value.transient is True
 
     async def test_too_many_redirects_is_a_fetch_error(self):
         """跳转打转（超过 max_redirects）算抓取失败，不能当成「源没有条目」"""
@@ -448,8 +452,31 @@ class TestFetchEdgeCases:
             headers={"content-type": "text/html"},
         )
 
-        with _patched_request(challenge), pytest.raises(FetchError):
+        with _patched_request(challenge), pytest.raises(FetchError) as error:
             await fetch(_RESPONSE_URL)
+
+        # 4xx 是「这个地址不行」：带上状态码，且**不是**「稍后重试就好」
+        assert error.value.status == 403
+        assert error.value.transient is False
+
+    async def test_server_error_is_transient(self):
+        """5xx 是「上游现在不行」：可以先把订阅建起来、稍后再抓（区分开来才不会劝退用户）"""
+        down = _stub_response(b"<html>oops</html>", status=503)
+
+        with _patched_request(down), pytest.raises(FetchError) as error:
+            await fetch(_RESPONSE_URL)
+
+        assert error.value.status == 503
+        assert error.value.transient is True
+
+    async def test_too_many_requests_is_transient(self):
+        """429 是限流：过一会儿就好，同样算「稍后可重试」"""
+        limited = _stub_response(b"slow down", status=429)
+
+        with _patched_request(limited), pytest.raises(FetchError) as error:
+            await fetch(_RESPONSE_URL)
+
+        assert error.value.transient is True
 
     async def test_unparsable_body_without_entries(self):
         """2xx + 解析异常 + 无条目：行为不变（仍返回 None），只是日志能分辨了"""
@@ -467,8 +494,11 @@ class TestFetchEdgeCases:
         不翻译成 FetchError 的话 `FeedService.update` 的 `except FetchError` 接不住，
         每轮刷新都会冒一条未捕获异常。
         """
-        with pytest.raises(FetchError):
+        with pytest.raises(FetchError) as error:
             await fetch("http://example.com:notaport/feed")
+
+        # 地址本身不合法：重试多少次都一样
+        assert error.value.transient is False
 
 
 class TestFetchOverTheWire:

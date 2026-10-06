@@ -49,12 +49,15 @@ class FeedService:
         return await self._repository.list_()
 
     async def insert_by_href(self, href: str) -> Feed | None:
+        """按 href 建源（**真的抓一次**）
+
+        返回 `None` 表示「抓到了，但源现在没有条目」；抓取失败则把 `FetchError` 原样
+        上抛 —— 「要不要先把订阅建起来」是调用方的事（见
+        `SubscriptionService.subscribe`），这里没有足够信息替它决定。
+        """
         # 身份先规范化：`p@ss` 与 `p%40ss` 是同一个密码的两种写法，不折叠就会变成两行
         href = normalize_href(href)
-        try:
-            feed = await fetch(href)
-        except FetchError:
-            return None
+        feed = await fetch(href)
         if feed:
             _logger.info("已从 %s 获取订阅源 %s", redact_credentials(href), feed.title)
             # 身份用**用户提交的 href**（可能带凭据），不是 `feed.href`——那是脱掉凭据、

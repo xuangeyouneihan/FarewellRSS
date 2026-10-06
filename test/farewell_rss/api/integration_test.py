@@ -848,6 +848,68 @@ async def _title_to_id(client: AsyncClient, headers: dict) -> dict[str, str]:
     return {it["title"]: it["id"] for it in r.json()["items"]}
 
 
+async def test_quickadd_reports_permanent_fetch_failure(client: AsyncClient):
+    """订阅一个抓不回来的源：给一句能看懂的错误，**不是 500**
+
+    旧实现在这里是未捕获的 `ValueError` → 500 +「Internal Server Error」，用户只知道
+    「服务器错误」，既不知道原因也不知道该怎么办。
+    """
+    from farewell_rss.feed_fetcher.feed_fetcher import FetchError
+
+    headers = await _register(client, "quickadd-404")
+
+    async def _gone(url, etag=None, modified=None):
+        raise FetchError(url, status=404, transient=False)
+
+    with patch("farewell_rss.services.feed.fetch", side_effect=_gone):
+        r = await client.post(
+            f"{BASE}/subscription/quickadd",
+            data={"quickadd": "https://example.com/gone.xml"},
+            headers=headers,
+        )
+
+    assert r.status_code == 502, r.text
+    payload = r.json()["detail"]
+    assert payload["numResults"] == 0
+    assert payload["error"]["code"] == "FeedFetchFailed"
+    assert "404" in payload["error"]["detail"]
+
+    # 没留下半个订阅
+    r = await client.get(f"{BASE}/subscription/list", headers=headers)
+    assert r.json()["subscriptions"] == []
+
+
+async def test_quickadd_keeps_subscription_when_fetch_times_out(client: AsyncClient):
+    """网络层失败（超时）：先把订阅建起来，内容交给调度器重试
+
+    这条链路实测很不稳（源 1 MB、经代理有时 4.7 秒抓到、有时 14 秒超时），让用户反复
+    手点重试没有意义。占位记录的 `fetched` 是 NEVER_FETCHED，下一轮刷新必然挑中它。
+    """
+    from farewell_rss.feed_fetcher.feed_fetcher import FetchError
+
+    headers = await _register(client, "quickadd-timeout")
+
+    async def _timeout(url, etag=None, modified=None):
+        raise FetchError(url)  # 传输层失败 → transient
+
+    with patch("farewell_rss.services.feed.fetch", side_effect=_timeout):
+        r = await client.post(
+            f"{BASE}/subscription/quickadd",
+            data={"quickadd": "https://example.com/slow.xml"},
+            headers=headers,
+        )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["numResults"] == 1
+
+    r = await client.get(f"{BASE}/subscription/list", headers=headers)
+    subs = r.json()["subscriptions"]
+    assert len(subs) == 1
+    # 还没抓到源标题 → 退回显示 URL（空白一行比一串 URL 更难用）
+    assert subs[0]["title"] == "https://example.com/slow.xml"
+    assert subs[0]["url"] == "https://example.com/slow.xml"
+
+
 async def test_label_stream_type_param(client: AsyncClient):
     """同名 folder/tag 时，type 参数能区分"""
     h = await _register(client)

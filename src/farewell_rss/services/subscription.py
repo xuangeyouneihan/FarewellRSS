@@ -2,7 +2,8 @@ import logging
 
 from ..db.models import Feed, Label, Subscription, User
 from ..db.repositories.subscription import SubscriptionRepository
-from ..feed_fetcher.feed_fetcher import redact_credentials
+from ..feed_fetcher.feed_fetcher import FetchError, redact_credentials
+from .exceptions import FeedFetchFailedError
 from .feed import FeedService
 from .read_state import ReadStateService
 
@@ -46,8 +47,16 @@ class SubscriptionService:
     ) -> Subscription:
         """订阅一个源
 
-        `fetch=True`（默认）：立刻抓一次拿标题/图标，抓不到就拒绝订阅 —— 交互式订阅
-        （quickadd / subscription edit）走这条，用户应该当场看到失败。
+        `fetch=True`（默认）：立刻抓一次拿标题/图标 —— 交互式订阅（quickadd /
+        subscription edit）走这条。但**抓取失败不等于订阅失败**，按失败原因分两种：
+
+        * 网络层失败（超时/DNS/TLS）与 5xx/429：上游「现在不行」，先把订阅建起来
+          （占位记录，与 OPML 导入同一条路），内容交给下一轮刷新。交互式订阅被一次
+          超时卡住是错的：同一条链路几秒前能成、十几秒后超时都可能（代理不稳、源
+          本身慢），让用户反复手点重试解决不了任何问题。
+        * 4xx（403 被 WAF 拒 / 404 源已失效 / 410 已删）与「抓到了但没有条目」：
+          那是**地址不对或源已废**，重试不会变好 —— 抛 `FeedFetchFailedError`，
+          当场告诉用户。
 
         `fetch=False`：只建记录、不抓内容 —— 导入 OPML 走这条（对齐 FreshRSS：它导入
         时只建订阅，抓取交给之后的刷新）。一个源 403/503 不该让整份导入少一条订阅，
@@ -67,12 +76,10 @@ class SubscriptionService:
             fetch,
         )
         feed = (
-            await self._feed_service.insert_by_href(feed_href)
+            await self._fetched_feed(feed_href)
             if fetch
             else await self._feed_service.get_or_create_stub(feed_href)
         )
-        if feed is None:
-            raise ValueError(f"无法通过 href 插入或获取订阅源: {feed_href}")
         return await self._repository.upsert(
             user_id=user.id,
             feed_id=feed.id,
@@ -82,6 +89,45 @@ class SubscriptionService:
             icon=icon,
             folder_id=folder_id,
         )
+
+    async def _fetched_feed(self, feed_href: str) -> Feed:
+        """抓一次拿源记录；抓不到时按「值不值得重试」决定是报错还是先建占位记录"""
+        try:
+            feed = await self._feed_service.insert_by_href(feed_href)
+        except FetchError as error:
+            if not error.transient:
+                raise FeedFetchFailedError(
+                    f"无法订阅 {redact_credentials(feed_href)}：对方返回 {error.reason}"
+                ) from error
+            _logger.warning(
+                "订阅源 %s 首次抓取失败（%s），先建订阅，内容交给下一轮刷新",
+                redact_credentials(feed_href),
+                error.reason,
+            )
+            return await self._stub(feed_href)
+        if feed is None:
+            # 2xx 但一条条目都没有：多半这个地址根本不是 feed（WAF 挑战页 / HTML 页面），
+            # 也可能是个暂时空的真源。两种都当场说清楚：此处不能返回 None（旧实现在
+            # 这里抛出 ValueError，最终变成一个没有任何解释的 500）。
+            raise FeedFetchFailedError(
+                f"无法订阅 {redact_credentials(feed_href)}："
+                "这个地址没有解析出任何条目，可能不是 RSS 源"
+            )
+        return feed
+
+    async def _stub(self, feed_href: str) -> Feed:
+        """建一条「还没抓过内容」的源记录（不抓）
+
+        `get_or_create_stub` 会拒绍不像话的 URL（`_is_http_url`）並抛 `ValueError`。
+        正常情况走不到（能过 `fetch` 的网络层失败就说明地址能解析），这里只是兵兵：
+        宁可报一句能看懂的错，也别再让人看见 500。
+        """
+        try:
+            return await self._feed_service.get_or_create_stub(feed_href)
+        except ValueError as error:
+            raise FeedFetchFailedError(
+                f"无法订阅 {redact_credentials(feed_href)}：{error}"
+            ) from error
 
     async def update(
         self,

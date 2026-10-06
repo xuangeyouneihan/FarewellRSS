@@ -83,7 +83,29 @@ _allow_embedded_players()
 
 
 class FetchError(Exception):
-    """RSS 源抓取失败（网络错误等）"""
+    """RSS 源抓取失败
+
+    两个事实分开说清楚，因为是**两种处置方式**：
+
+    * `status` —— HTTP 层失败时的状态码；传输层失败（DNS/连不上/TLS/超时/跳转过多）是
+      `None`。
+    * `transient` —— 值不值得「先把订阅建起来、稍后再抓」：
+      - 传输层失败：是（超时、DNS 抽风都是一时的）；
+      - 5xx（上游故障）、429（限流）：是；
+      - 其余 4xx（403 被 WAF 拒、404 源已失效、410 已删）：**否** —— 重试多少次都一样，
+        当场告诉用户比种一条永远抓不回来的订阅好。
+    """
+
+    def __init__(self, url: str, *, status: int | None = None, transient: bool = True):
+        super().__init__(url)
+        self.url = url
+        self.status = status
+        self.transient = transient
+
+    @property
+    def reason(self) -> str:
+        """给日志/错误消息用的一句话（不含 URL，URL 由调用方脱敏后自己拼）"""
+        return f"HTTP {self.status}" if self.status is not None else "网络错误"
 
 
 # 已经为「明文 HTTP + 凭据」警告过的源（用**脱敏后**的 URL 当键，免得凭据进内存）。
@@ -234,10 +256,14 @@ async def _request(
             max_redirects=_MAX_REDIRECTS,
         ) as client:
             return await client.get(url, headers=headers)
+    except httpx.InvalidURL as error:
+        # 地址本身不合法（比如主机名里有非法字符）：重试多少次都一样，不算「暂时」
+        _logger.warning("订阅源 %s 地址不合法：%s", redact_credentials(url), error)
+        raise FetchError(url, transient=False) from error
     except httpx.TimeoutException as error:
         _logger.warning("订阅源 %s 抓取超时：%s", redact_credentials(url), error)
         raise FetchError(url) from error
-    except (httpx.HTTPError, httpx.InvalidURL) as error:
+    except httpx.HTTPError as error:
         _logger.warning("订阅源 %s 抓取失败：%s", redact_credentials(url), error)
         raise FetchError(url) from error
 
@@ -436,7 +462,7 @@ async def fetch(
         # 比如 `http://host:不是端口/feed`：`_is_http_url` 拦不住（urlparse 不校验端口），
         # 到取 port 时才炸。按抓取失败处理，别让它变成每轮一条未捕获异常。
         _logger.warning("订阅源 %s 地址不合法：%s", redact_credentials(url), error)
-        raise FetchError(url) from error
+        raise FetchError(url, transient=False) from error
 
     # 凭据 + 明文 HTTP：会以明文过网，只提醒不拦（内网 http 源是常见配置）
     if authorization and clean_url.startswith("http://"):
@@ -472,7 +498,8 @@ async def fetch(
             status,
             headers.get("content-type"),
         )
-        raise FetchError(url)
+        # 5xx/429 是「上游现在不行」，4xx 是「这个地址不行」—— 前者值得先建订阅、稍后再抓
+        raise FetchError(url, status=status, transient=status >= 500 or status == 429)
 
     raw_feed = feedparser.parse(
         response.content,

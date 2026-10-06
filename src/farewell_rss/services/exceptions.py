@@ -83,3 +83,16 @@ class InvalidSearchQueryError(ValueError):
     @classmethod
     def from_query(cls, query: str) -> InvalidSearchQueryError:
         return cls(f"{cls.log_message}（{query}）")
+
+
+class FeedFetchFailedError(ServiceError):
+    """订阅一个源时抓不到，而且**重试也不会好**
+
+    两种情况走这里：对方回了 4xx（403 被 WAF 拒、404 源已失效、410 已删），或者
+    抓到的根本不是 feed（2xx 但一条条目都没有）。
+
+    网络层失败（超时/DNS/TLS）与 5xx/429 **不**走这里 —— 那是「上游现在不行」，
+    会把订阅先建起来、内容交给调度器重试（见 `SubscriptionService.subscribe`）。
+    """
+
+    log_message = "订阅源抓取失败"

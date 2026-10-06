@@ -314,6 +314,19 @@ Returns `{"subscriptions": [...]}`. Each subscription includes `id`, `title`, `c
 | ------------ | ----------- |
 | `quickadd` | feed URL    |
 
+On success: `{"numResults": 1, "query": "<feed URL>", "streamId": "feed/<id>", "streamName": "<title>"}`.
+
+**Semantics when the fetch fails** (subscribing is interactive, so the feed is fetched once up front to get its title/icon):
+
+- **Transport failures (timeout/DNS/TLS) and 5xx/429** — the upstream is “temporarily unavailable”, so the **subscription is created anyway** and its content is left to the background refresh (the placeholder's `fetched` predates any TTL, so the next round is guaranteed to pick it up). `streamName` may be an empty string in this case; the feed's name in the list falls back to its URL until the first successful fetch. Rationale: slow feeds and flaky links (measured on the same 1 MB feed: 4.7 s one moment, a 14 s timeout the next, through a proxy) should not force the user to keep retrying by hand.
+- **4xx (403 from a WAF / 404 gone / 410 deleted) and “fetched but has no entries”** — the URL is wrong or the feed is dead, and retrying will not help: returns **502** with Google Reader's `numResults: 0` error shape:
+
+  ```json
+  { "detail": { "numResults": 0, "error": { "code": "FeedFetchFailed", "detail": "无法订阅 <URL>：对方返回 HTTP 404" } } }
+  ```
+
+  No subscription is created in that case. (`subscription/edit` with `ac=subscribe` follows the same logic; it subscribes in bulk, so one permanent failure fails the whole request.)
+
 ### subscription/export
 
 `GET /reader/api/0/subscription/export`

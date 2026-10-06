@@ -1,7 +1,9 @@
 """`SubscriptionService.subscribe()` 的两条路径
 
-- 交互式订阅（quickadd / subscription edit）：`fetch=True`，立刻抓一次拿标题，抓不到
-  就拒绝订阅 —— 用户该当场看到失败。
+- 交互式订阅（quickadd / subscription edit）：`fetch=True`，立刻抓一次拿标题；**抓取
+  失败不等于订阅失败**，按原因分两种：
+  * 网络层失败 / 5xx：先建占位记录，内容交给调度器（同 OPML 导入那条路）；
+  * 4xx / 抓到了但没有条目：抛 `FeedFetchFailedError`，当场告诉用户。
 - 导入 OPML：`fetch=False`，**只建记录、不抓内容**（对齐 FreshRSS）。一个源 403/503
   不该让整份导入少一条订阅，导入也不必串行等几十次网络；内容交给导入之后的那轮刷新
   （占位记录的 `fetched` 是 `NEVER_FETCHED`，必然被挑中）。
@@ -22,6 +24,7 @@ from farewell_rss.feed_fetcher.feed_fetcher import (
     FetchError,
 )
 from farewell_rss.services import feed as feed_service_module
+from farewell_rss.services.exceptions import FeedFetchFailedError
 
 
 @pytest_asyncio.fixture
@@ -136,8 +139,75 @@ async def test_subscribe_with_fetch_uses_fetched_title(session, monkeypatch):
     assert feed.fetched == fetched_at
 
 
-async def test_subscribe_with_fetch_rejects_unreachable_feed(session, monkeypatch):
-    """交互式订阅抓不到就拒绝，不留半个订阅"""
+async def test_subscribe_with_fetch_falls_back_to_stub_on_network_failure(
+    session, monkeypatch
+):
+    """网络层失败（超时/DNS/TLS）**不**拒绝订阅：先建占位记录，内容交给调度器
+
+    实测过的场景：同一个源经代理抓 4.7 秒能成、14 秒超时也出现过（源本身 1 MB）。
+    让用户反复手点重试解决不了任何问题，而占位记录的 `NEVER_FETCHED` 早于任何 TTL，
+    调度器下一轮必然把它挑出来。
+    """
+
+    async def _fail(url, etag=None, modified=None):
+        raise FetchError(url)  # 传输层失败 → transient 默认 True
+
+    monkeypatch.setattr(feed_service_module, "fetch", _fail)
+    user = await _add_user(session)
+
+    subscription = await build_services(session).subscription.subscribe(
+        user=user, feed_href="https://example.com/slow.xml"
+    )
+
+    feed = await session.scalar(select(Feed).where(Feed.id == subscription.feed_id))
+    assert feed is not None
+    assert feed.fetched == NEVER_FETCHED  # 还没抓过 → 下一轮刷新必然挑中它
+    assert feed.title is None  # 没抓到就没有源标题（界面上会退回显示 URL）
+
+
+async def test_subscribe_with_fetch_rejects_client_error(session, monkeypatch):
+    """4xx（403/404/410）是「地址错 / 被拒」：重试不会变好，当场报错且不留半个订阅"""
+
+    async def _fail(url, etag=None, modified=None):
+        raise FetchError(url, status=404, transient=False)
+
+    monkeypatch.setattr(feed_service_module, "fetch", _fail)
+    user = await _add_user(session)
+
+    with pytest.raises(FeedFetchFailedError, match="404"):
+        await build_services(session).subscription.subscribe(
+            user=user, feed_href="https://example.com/gone.xml"
+        )
+
+    assert (await session.scalars(select(Subscription))).all() == []
+    assert (await session.scalars(select(Feed))).all() == []
+
+
+async def test_subscribe_with_fetch_rejects_feed_without_entries(session, monkeypatch):
+    """抓到了 2xx 但一条条目都没有：多半这个地址不是 feed，当场报错
+
+    旧实现在这里是 `ValueError` → API 层 500（用户只看到「服务器错误」，没有任何
+    可行动的信息）。
+    """
+
+    async def _empty(url, etag=None, modified=None):
+        return None
+
+    monkeypatch.setattr(feed_service_module, "fetch", _empty)
+    user = await _add_user(session)
+
+    with pytest.raises(FeedFetchFailedError, match="没有解析出任何条目"):
+        await build_services(session).subscription.subscribe(
+            user=user, feed_href="https://example.com/not-a-feed"
+        )
+
+    assert (await session.scalars(select(Subscription))).all() == []
+
+
+async def test_subscribe_rejects_unusable_url_after_network_failure(
+    session, monkeypatch
+):
+    """兜底：网络层失败后要建占位记录时，URL 不像话也报同一类错（而不是 500）"""
 
     async def _fail(url, etag=None, modified=None):
         raise FetchError(url)
@@ -145,9 +215,9 @@ async def test_subscribe_with_fetch_rejects_unreachable_feed(session, monkeypatc
     monkeypatch.setattr(feed_service_module, "fetch", _fail)
     user = await _add_user(session)
 
-    with pytest.raises(ValueError, match="无法通过 href 插入或获取订阅源"):
+    with pytest.raises(FeedFetchFailedError, match="不是可抓取的 URL"):
         await build_services(session).subscription.subscribe(
-            user=user, feed_href="https://example.com/x.xml"
+            user=user, feed_href="不是网址"
         )
 
     assert (await session.scalars(select(Subscription))).all() == []
