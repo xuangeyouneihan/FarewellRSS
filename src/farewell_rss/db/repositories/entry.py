@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...enums import Filtering, SortOrder
 from ...feed_fetcher.feed_fetcher import FetchedEntry
-from ..models import Entry, ReadState, StarState, Subscription
+from ..models import Enclosure, Entry, ReadState, StarState, Subscription
 from ._chunking import chunked
 from .enclosure import EnclosureRepository
 
@@ -196,6 +196,15 @@ class EntryRepository:
             entries.update((entry.id, entry) for entry in result.scalars().all())
         _logger.debug("批量获取 %d 条条目，获取到 %d 条", len(ids), len(entries))
         return entries
+
+    async def list_enclosures(self, entry_ids: list[int]) -> dict[int, list[Enclosure]]:
+        """一次取多个条目的附件。
+
+        附件是 upsert 时通过 `_enclosure_repository` 写进去的，读也从这里出去 ——
+        服务层不必自己再开一个 EnclosureRepository（同一个 session 上出现两个实例，
+        视图不一致时很难查）。
+        """
+        return await self._enclosure_repository.list_by_entries(entry_ids)
 
     async def get_by_feed_and_guid(self, feed_id: int, guid: str) -> Entry | None:
         _logger.debug("获取条目，feed_id: %d, guid: %s", feed_id, guid)

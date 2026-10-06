@@ -22,6 +22,39 @@ class EnclosureRepository:
         _logger.debug("查询条目 %d 的附件，共 %d 条", entry_id, len(result))
         return result
 
+    async def list_by_entries(self, entry_ids: list[int]) -> dict[int, list[Enclosure]]:
+        """一次取多个条目的附件，返回 `{entry_id: [Enclosure, ...]}`。
+
+        **没有附件的条目不会出现在结果里**（调用方用 `.get(entry_id, [])` 兜底），
+        这样能区分「没查到」和「这个条目确实没附件」。
+
+        逐条调 list_by_entry 是「每条一次 SELECT」的 N+1：列一页 20 条条目就多 20 条
+        查询。`IN (...)` 的参数个数有上限，按 `chunked` 分批（见 `_chunking`）。
+
+        每个条目下的附件按 href 排序 —— 排序是为了输出稳定（同一个源每次列出来顺序
+        一样），不是业务需要。
+        """
+        if not entry_ids:
+            _logger.debug("批量查询附件，entry_ids 为空")
+            return {}
+
+        result: dict[int, list[Enclosure]] = {}
+        for batch in chunked(entry_ids):
+            rows = await self._session.scalars(
+                select(Enclosure)
+                .where(Enclosure.entry_id.in_(batch))
+                .order_by(Enclosure.entry_id, Enclosure.href)
+            )
+            for row in rows.all():
+                result.setdefault(row.entry_id, []).append(row)
+
+        _logger.debug(
+            "批量查询 %d 个条目的附件，共 %d 条",
+            len(entry_ids),
+            sum(len(items) for items in result.values()),
+        )
+        return result
+
     async def update_by_entries(
         self,
         enclosures: dict[int, list[FetchedEnclosure]],

@@ -87,6 +87,13 @@ export interface TagItem {
   type?: LabelType
 }
 
+/** 条目的附件（播客音频、视频、单集封面…），形状照 Google Reader 的既有约定 */
+export interface Enclosure {
+  href: string
+  type: string
+  length?: number
+}
+
 /** 文章条目（stream/contents 的 item） */
 export interface Item {
   id: string
@@ -104,6 +111,11 @@ export interface Item {
     htmlUrl: string
   }
   summary: { content: string }
+  /**
+   * 附件。**没有附件时后端不发这个键**（和 FreshRSS 一致），所以是可选的 ——
+   * 别拿它当“空数组”用；形状与键序的理由见 src/farewell_rss/api/_enclosures.py
+   */
+  enclosure?: Enclosure[]
   author: string | null
 }
 

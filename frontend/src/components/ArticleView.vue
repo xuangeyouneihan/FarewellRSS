@@ -17,6 +17,7 @@ import {
   playableUrl,
   sanitizeArticleHtml,
 } from "@/utils/sanitize";
+import { chapterSeconds, findPlayer, isBareFragment, seekTo } from "@/utils/chapter";
 import { hasEmbedConsent, rememberEmbedConsent } from "@/utils/embedConsent";
 import { t } from "@/i18n";
 
@@ -41,8 +42,42 @@ const currentItemHtml = computed(() =>
 /** 当前条目的源（`feed/12` 这种）—— 同意按源记 */
 const currentFeedId = computed(() => currentItem.value?.origin.streamId ?? "");
 
+/*
+ * 附件（播客音频、视频、单集封面…）**不由前端渲染**，由后端拼在正文末尾
+ * （见 `src/farewell_rss/api/_enclosures.py`）。
+ *
+ * 为什么改到服务端：GReader 的 `enclosure` 数组我们照发（那是契约），但**没有一家客户端读它**
+ * —— ReadYou / Reeder / NetNewsWire 都只渲染 `summary.content` 里的 HTML。只发数组的话，
+ * 播客在这些客户端里就是个没有播放器的简介页。拼进正文是 FreshRSS 的做法。
+ *
+ * 于是这边什么都不用做：消毒会把 `figure` / `audio` / `video` / `img` 放行（见 `sanitize.ts`），
+ * `preload="none"` 也意味着不按播放不发请求，和后端那套「不自动加载第三方内容」的底线一致。
+ */
+
 /** 确认行 → 它替掉的那个占位器，点「取消」时原样换回来 */
 const replacedPlaceholders = new WeakMap<HTMLElement, HTMLElement>();
+
+/**
+ * 正文里的链接。**返回 `true` 表示已经处理**，调用方不应再往下走。
+ *
+ * 两件事，都因为 hash 路由：
+ *
+ * 1. **章节链接**（`#t=00:05:18`）→ 不跳页，把正文末尾那个播放器跳过去。注意入库时 feedparser
+ *    已经把它补成绝对地址（`…/feed/audio.xml#t=…`），所以判据是片段，见 `utils/chapter.ts`。
+ * 2. 其它「就在本文档内跳」的锚点 → 拦下但什么都不做：`#foo` 会顶掉 `#/…`，匹配不上任何
+ *    路由就什么都不渲染（`router/index.ts` 有意没有 catch-all），整页空白比不滚更糟。
+ */
+function onBodyLink(link: HTMLAnchorElement, event: MouseEvent, body: ParentNode): boolean {
+  const href = link.getAttribute("href") ?? "";
+  const seconds = chapterSeconds(href);
+  if (seconds === null && !isBareFragment(href)) return false;
+
+  event.preventDefault();
+  if (seconds === null) return true;
+  const player = findPlayer(body);
+  if (player) seekTo(player, seconds);
+  return true;
+}
 
 /**
  * 正文里的占位器是 v-html 注入的，挂不上 Vue 事件，所以用委托。
@@ -54,6 +89,15 @@ const replacedPlaceholders = new WeakMap<HTMLElement, HTMLElement>();
 function onBodyClick(event: MouseEvent) {
   const target = event.target;
   if (!(target instanceof Element)) return;
+  const body = event.currentTarget as HTMLElement | null;
+  if (!body) return;
+
+  // 占位器和确认行里的按钮也是链接，别被章节链接那套判断截走（它们的地址理论上也能带 `#t=`）
+  if (!target.closest(".embed")) {
+    const link = target.closest<HTMLAnchorElement>("a");
+    if (link && onBodyLink(link, event, body)) return;
+  }
+
   const embed = target.closest<HTMLElement>(".embed");
   if (!embed) return;
 
@@ -367,6 +411,41 @@ async function onTagChange(value: string): Promise<void> {
 
 .article-body {
   line-height: 1.7;
+}
+
+/* 正文里任何播放器都撑满栏宽（`<audio>` 默认 300px，占不满） */
+.article-body :deep(audio),
+.article-body :deep(video) {
+  width: 100%;
+  max-width: 100%;
+}
+
+/* 附件块（后端拼在正文末尾，标记见 api/_enclosures.py）。
+   播放器和 💾 必须在同一行：`figure`/`p` 都是块级、里面按 inline 流排，上面那句
+   `width: 100%` 就会把链接挤到第二行（实测附件块 85px 里有 18px 就是被挤下去的那行）。
+   所以把内容行改成 flex：播放器吃掉剩余宽度、链接贴右且不参与伸缩。 */
+.article-body :deep(.enclosure) {
+  /* `<figure>` 浏览器默认还带 40px 左右外边距 */
+  margin: 18px 0 0;
+}
+
+.article-body :deep(.enclosure-content) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.article-body :deep(.enclosure-content audio),
+.article-body :deep(.enclosure-content video) {
+  /* `min-width: 0` 不能省：flex 项的自动最小尺寸是 min-content，播放器控件的固有宽度
+     会让它宁可溢出也不收缩，链接照样被顶出去。 */
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.article-body :deep(.enclosure-content a) {
+  flex: 0 0 auto;
 }
 
 .article-footer {

@@ -54,6 +54,13 @@ TEST_FEED = FetchedFeed(
             content="<p>大火快炒是中餐的精华</p>",
             content_plain="大火快炒是中餐的精华",
             author=_A("Chef"),
+            enclosures=[
+                FetchedEnclosure(
+                    href="https://example.com/ep2.mp3",
+                    length=1024,
+                    type="audio/mpeg",
+                ),
+            ],
         ),
         FetchedEntry(
             guid="entry-3",
@@ -227,6 +234,35 @@ async def test_full_flow(client: AsyncClient):
     assert "《炒饭指南》第一章" in titles
     assert "《炒饭指南》第二章" in titles
     assert "《炒饭指南》第三章" in titles
+
+    # 4b. 附件（`enclosure`）。形状与键序的理由见 src/farewell_rss/api/_enclosures.py：
+    # 这个字段没有正式文档，靠真实客户端的读法钉住（News+ 见到 type 才分派，用之前记下的
+    # href，所以 href 必须排在前面）。
+    by_title = {it["title"]: it for it in items}
+    recipe = by_title["《炒饭指南》第一章"]["enclosure"]
+    assert recipe == [
+        {
+            "href": "https://example.com/recipe.pdf",
+            "type": "application/pdf",
+            "length": 1024,
+        }
+    ]
+    assert list(recipe[0]) == ["href", "type", "length"]
+    # 音视频还会拼进正文末尾（不读 `enclosure` 字段的客户端靠这个才播得出来）：
+    # `<audio preload="none">` + 一个 💾 保存链接
+    audio = by_title["《炒饭指南》第二章"]["summary"]["content"]
+    assert (
+        '<audio preload="none" controls="controls" src="https://example.com/ep2.mp3">'
+        "</audio>" in audio
+    ), audio
+    assert "💾" in audio
+    # 其它类型（这里是 pdf）只给保存链接，不拼播放器
+    pdf = by_title["《炒饭指南》第一章"]["summary"]["content"]
+    assert '<a href="https://example.com/recipe.pdf" target="_blank"' in pdf
+    assert "<audio" not in pdf
+    # 没有附件的条目**不发这个键**（不是空数组），正文也一字不改
+    assert "enclosure" not in by_title["《炒饭指南》第三章"]
+    assert by_title["《炒饭指南》第三章"]["summary"]["content"] == "甜品时间"
 
     # 5. 全部标已读
     r = await client.post(

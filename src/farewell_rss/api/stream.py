@@ -17,6 +17,7 @@ from ..services.read_state import ReadStateService
 from ..services.star_state import StarStateService
 from ..services.subscription import SubscriptionService
 from ._common import OutputType, Sorting, parse_item_ids
+from ._enclosures import build_enclosures, render_enclosures
 from .deps import (
     get_current_user,
     get_entry_service,
@@ -319,6 +320,7 @@ async def _build_items(
     label_service: LabelService,
     read_state_service: ReadStateService,
     star_state_service: StarStateService,
+    entry_service: EntryService,
 ) -> list[dict]:
     """将 Entry 列表转为 Google Reader API 格式的 items"""
     feed_map = await feed_service.get_batch([e.feed_id for e in entries])
@@ -330,6 +332,9 @@ async def _build_items(
     ])
     read_state_map = await read_state_service.get_batch(user, entries)
     star_state_map = await star_state_service.get_batch(user, entries)
+    # 播客的音频只在 `<enclosure>` 上（正文里通常只有一段简介），所以附件要单独取一批。
+    # 走批量接口：逐条取是一页 20 条就多 20 条查询。
+    enclosure_map = await entry_service.list_enclosures([e.id for e in entries])
 
     # **可见性过滤**：只给「订阅了这个源」或「这个条目有自己的已读/收藏记录」的条目。
     #
@@ -379,7 +384,7 @@ async def _build_items(
             if tag:
                 categories.append(f"user/-/label/{tag.name}")
 
-        items.append({
+        item: dict = {
             "id": f"tag:google.com,2005:reader/item/{entry.id:016x}",
             "crawlTimeMsec": str(int(entry.fetched.timestamp() * 1e3)),
             "timestampUsec": str(int(entry.fetched.timestamp() * 1e6)),
@@ -400,9 +405,25 @@ async def _build_items(
                 "title": feed.title if feed else "",
                 "htmlUrl": feed.link if feed else "",
             },
-            "summary": {"content": entry.content or entry.summary or ""},
+            "summary": {
+                # 附件（播放器 + 💾）拼在正文末尾：三个客户端都不读 `enclosure` 字段，
+                # 但都会把 `summary.content` 当 HTML 渲染。详见 api/_enclosures.py
+                "content": render_enclosures(
+                    entry.content or entry.summary or "",
+                    enclosure_map.get(entry.id, []),
+                )
+            },
             "author": entry.author_name,
-        })
+        }
+
+        # 附件也单独发一个数组：标准位置，给真读它的客户端用（形状与键序的理由见
+        # `_enclosures.py`：News+ 见到 `type` 才分派，`href` 必须排在前面）。
+        # 没有附件时**不加这个键**，不是发空数组 —— 和 FreshRSS 一样。
+        enclosures = build_enclosures(enclosure_map.get(entry.id, []))
+        if enclosures:
+            item["enclosure"] = enclosures
+
+        items.append(item)
 
     return items
 
@@ -459,6 +480,7 @@ async def stream_contents(
         label_service,
         read_state_service,
         star_state_service,
+        entry_service,
     )
     result: dict = {"id": s, "updated": _now(), "items": items}
     if continuation:
@@ -552,6 +574,7 @@ async def stream_items_contents(
         label_service,
         read_state_service,
         star_state_service,
+        entry_service,
     )
     return {
         "id": "user/-/state/com.google/reading-list",

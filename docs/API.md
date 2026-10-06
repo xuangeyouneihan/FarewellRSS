@@ -230,6 +230,53 @@
 
 > **与 FreshRSS 的差异**：告别 RSS 额外输出了条目的 TAG 标签，同名 folder/tag 会同时出现两条，前端可通过 `origin.streamId` 与 `subscription/list` 区分来源。
 
+### 附件（enclosure）输出
+
+带附件的条目**同时**走两条路输出：`enclosure` 数组（给机器读）+ 拼在正文末尾的播放器/图片（给人看）。
+
+#### 1. `enclosure` 数组
+
+`stream/contents` 和 `stream/items/contents` 都有：
+
+```json
+{
+  "enclosure": [
+    { "href": "https://media.example.com/ep12.mp3", "type": "audio/mpeg", "length": 12345678 }
+  ]
+}
+```
+
+- `href` — 附件地址，**只发绝对的 `http`/`https`**（`javascript:`、`data:`、相对地址一律不发，免得客户端把它塞进播放器）。
+- `type` — 源站声明的 MIME。缺失时发空字符串，**不按扩展名替源站猜**（这是 MIME 字段，写假值会被按 `type.split("/")` 用的客户端吃出问题）。
+- `length` — 字节数，仅有值（非 0）时才有这个键。
+- **`href` 排在 `type` 前面**这一点是契约的一部分：有客户端实现是「见到 `type` 才分派 image/video/audio，用之前记下的 `href`」，`type` 排在前面它会拿到 `null`。
+- **没有附件时整个键不出现**（不是空数组），和 FreshRSS 一致。
+
+> **关于这个字段的来历**：Google Reader API 没有为它留下正式文档 —— 那份事实上的非官方规范（`mihaip/google-reader-api`）里 item 对象那一页（`StreamContents`）从来没有写出来，只剩断链引用；FeedHQ 的文档也不提它。这里的形状和键序是按真实客户端的读法定的：FreshRSS 的 `Entry::toGReader()` 在所有模式下都发 `{href, type, length?}`，News+ 在 Google Reader / Bazqux / Inoreader 三个后端用同一段代码解析并按 `type` 前缀分派。所以**也不要往里加自有字段**（比如时长、单集封面）：GReader 只给了这三个键，FreshRSS 加自己的东西时用的是 `frss:` 前缀。
+
+#### 2. `summary.content` 末尾的附件块
+
+**为什么要拼第二遍**：真实客户端里 ReadYou、Reeder、NetNewsWire **没有一个读 `enclosure` 字段** —— 它们只渲染 `summary.content` 里的 HTML（Reeder 和 NetNewsWire 走 WebView，ReadYou 走 Compose 的 HTML 子集）。只发数组的话，播客在这些客户端里就是个没有播放器的简介页。FreshRSS 也是两条路都给。
+
+拼在**末尾**而不是开头：正文本身就是文章内容，插到最前面会把标题、首图挤下去；播客 show notes 的顺序是「简介 → 时间线 → 播放」，播放器跟在后面正好。
+
+| 附件类型 | 追加的 HTML |
+| -------- | ----------- |
+| `audio/*` | `<figure class="enclosure"><p class="enclosure-content"><audio preload="none" controls="controls" src="…"></audio> <a href="…" target="_blank" rel="noopener noreferrer">💾</a></p></figure>` |
+| `video/*` | 同上，`<audio>` 换成 `<video>` |
+| `image/*` | `<figure class="enclosure"><p class="enclosure-content"><img src="…" alt="" /></p></figure>` |
+| 其它 | 只有那个 💾 保存链接 |
+
+- 类型判定：先看 MIME 前缀（`audio/` `video/` `image/`），MIME 缺失或给不出前缀时**按扩展名兜底**（`mp3`/`m4a`/`aac`/`opus`/`flac`/`wav`… 见 `src/farewell_rss/api/_enclosures.py` 的 `_EXTENSION_KINDS`）。这里按扩展名猜是安全的：猜错了最坏只是控件不对，不涉及往 MIME 字段里写假值。
+- 不可播放的 `href`（相对地址、`javascript:`、`data:`）一律不拼，和数组那边同一条规则。
+- `href`/`src` 都经 `html.escape(href, quote=True)` 转义。
+- **正文里已经出现过同一个 `href` 的条目不再重复拼**（有的源自己就把音频写进正文了）。
+- `preload="none"` 是故意的：正文里可能有好几个播放器，不预载就代表**不按播放不发请求**。
+- 没有可拼的附件时正文**原样返回**，一个字节都不动。
+
+> 前端因此不再解析 `enclosure` 字段：播放控件由服务端给，客户端只要放行 `figure` / `audio` / `video` / `img` 就能显示。告别 RSS 自己的前端还会接管正文里 `#t=00:05:18` 这类章节链接 —— 点了不跳页，而是 seek 正文里的播放器。
+
+
 ---
 
 ## 订阅（Subscription）

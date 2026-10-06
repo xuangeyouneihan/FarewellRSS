@@ -78,6 +78,41 @@ async def test_list_by_entry(session, entry_factory):
     assert await repo.list_by_entry(entry2.id) == []
 
 
+async def test_list_by_entries(session, entry_factory):
+    """一次取多个条目的附件：没附件的条目不出现在结果里（调用方用 .get 兜底）
+
+    逐条调 list_by_entry 是「每条一次 SELECT」的 N+1，列表页正是靠这个批量接口
+    才只发一条查询。
+    """
+    repo = EnclosureRepository(session)
+
+    entry1 = await entry_factory()
+    entry2 = await entry_factory()
+    entry3 = await entry_factory()  # 没附件的对照条目
+
+    session.add_all([
+        # 故意乱序插入：同一个条目下的附件按 href 排序输出
+        Enclosure(entry_id=entry1.id, href="https://example.com/b.mp3", length=2),
+        Enclosure(entry_id=entry1.id, href="https://example.com/a.mp3", length=1),
+        Enclosure(entry_id=entry2.id, href="https://example.com/c.mp3", length=3),
+    ])
+    await session.commit()
+
+    result = await repo.list_by_entries([entry1.id, entry2.id, entry3.id])
+
+    assert set(result) == {entry1.id, entry2.id}
+    assert [e.href for e in result[entry1.id]] == [
+        "https://example.com/a.mp3",
+        "https://example.com/b.mp3",
+    ]
+    assert [(e.href, e.length) for e in result[entry2.id]] == [
+        ("https://example.com/c.mp3", 3)
+    ]
+
+    # 什么都不传：一条查询都不发
+    assert await repo.list_by_entries([]) == {}
+
+
 async def test_update_by_entry(session, entry_factory):
     repo = EnclosureRepository(session)
 

@@ -230,6 +230,52 @@ Each entry returns a `categories` array:
 
 > **Difference from FreshRSS**: FarewellRSS additionally outputs the entry's TAG labels; a folder and tag with the same name will both appear, and the frontend can distinguish their sources via `origin.streamId` and `subscription/list`.
 
+### Enclosure Output
+
+Items with attachments are emitted through **two** channels at once: the `enclosure` array (for machines) and a player/image block appended to the end of the body (for humans).
+
+#### 1. The `enclosure` array
+
+On both `stream/contents` and `stream/items/contents`:
+
+```json
+{
+  "enclosure": [
+    { "href": "https://media.example.com/ep12.mp3", "type": "audio/mpeg", "length": 12345678 }
+  ]
+}
+```
+
+- `href` — attachment URL. **Only absolute `http`/`https`** is emitted (`javascript:`, `data:` and relative URLs are dropped, so that no client is handed something it might load into a player).
+- `type` — the MIME type as declared by the feed. When absent this is an empty string: we **do not guess a type from the file extension**, since this is a MIME field and a fabricated value breaks clients that do `type.split("/")`.
+- `length` — size in bytes; the key is present only when it is known (non-zero).
+- The **`href` before `type`** ordering is part of the contract: at least one real client dispatches image/video/audio when it sees `type`, using the `href` it recorded earlier — with `type` first it would read `null`.
+- **When there are no attachments the key is omitted entirely** (not an empty array), matching FreshRSS.
+
+> **Where this field comes from**: the Google Reader API never documented it — the item object page (`StreamContents`) of the de-facto unofficial spec (`mihaip/google-reader-api`) was never written, leaving a dangling link, and FeedHQ's docs do not mention it either. The shape and key order here were derived from how real clients read it: FreshRSS's `Entry::toGReader()` emits `{href, type, length?}` in every mode, and News+ parses it with the same code across its Google Reader / Bazqux / Inoreader backends. So **do not add your own fields** (duration, episode artwork, …) here: GReader gave this slot only these three keys, and FreshRSS prefixes its own additions with `frss:`.
+
+#### 2. The attachment block at the end of `summary.content`
+
+**Why a second copy**: among real clients, ReadYou, Reeder and NetNewsWire **none of them reads the `enclosure` field** — they only render the HTML in `summary.content` (Reeder and NetNewsWire use a WebView; ReadYou uses Compose's HTML subset). With the array alone, a podcast shows up in those clients as a blurb with no player at all. FreshRSS also does both.
+
+It is appended at the **end** rather than the beginning: the body is the article itself, and injecting a player up front would push the title and lead image down; podcast show notes read "blurb → timeline → play", so the player at the bottom fits.
+
+| Attachment type | Appended HTML |
+| --------------- | ------------- |
+| `audio/*` | `<figure class="enclosure"><p class="enclosure-content"><audio preload="none" controls="controls" src="…"></audio> <a href="…" target="_blank" rel="noopener noreferrer">💾</a></p></figure>` |
+| `video/*` | same, with `<video>` instead of `<audio>` |
+| `image/*` | `<figure class="enclosure"><p class="enclosure-content"><img src="…" alt="" /></p></figure>` |
+| anything else | just that 💾 save link |
+
+- Kind detection: the MIME prefix (`audio/` `video/` `image/`) comes first; when the MIME is missing or has no such prefix we **fall back to the file extension** (`mp3`/`m4a`/`aac`/`opus`/`flac`/`wav`… see `_EXTENSION_KINDS` in `src/farewell_rss/api/_enclosures.py`). Guessing here is safe: the worst case is the wrong control, not a fabricated value in a MIME field.
+- Unloadable `href`s (relative, `javascript:`, `data:`) are never emitted — the same rule as for the array.
+- `href`/`src` go through `html.escape(href, quote=True)`.
+- An `href` that **already appears in the body is not appended again** (some feeds put the audio straight into the body).
+- `preload="none"` is deliberate: a body can hold several players, and this means **no request is made until the user hits play**.
+- When there is nothing to append, the body is returned **unchanged**, byte for byte.
+
+> The frontend therefore no longer parses the `enclosure` field: the controls come from the server, so a client only has to allow `figure` / `audio` / `video` / `img` through its sanitizer. FarewellRSS's own frontend additionally intercepts chapter links such as `#t=00:05:18` in the body — clicking one does not navigate, it seeks the player in the body.
+
 ---
 
 ## Subscription

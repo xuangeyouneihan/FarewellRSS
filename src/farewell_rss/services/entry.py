@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy.exc import OperationalError
 
-from ..db.models import Entry, Feed
+from ..db.models import Enclosure, Entry, Feed
 from ..db.repositories.entry import EntryRepository
 from ..enums import Filtering, SortOrder
 from .exceptions import InvalidSearchQueryError
@@ -38,6 +38,14 @@ class EntryService:
 
     async def get_batch(self, ids: list[int]) -> dict[int, Entry]:
         return await self._repository.get_batch(ids)
+
+    async def list_enclosures(self, entry_ids: list[int]) -> dict[int, list[Enclosure]]:
+        """一次取多个条目的附件（播客音频、视频、封面……）。
+
+        RSS 的附件在 `<enclosure>` 上，不在正文里 —— 播客源的正文往往只有一段简介，
+        音频全靠这个字段才拿得到。
+        """
+        return await self._repository.list_enclosures(entry_ids)
 
     async def get_by_feed_and_guid(self, feed: Feed, guid: str) -> Entry | None:
         return await self._repository.get_by_feed_and_guid(feed.id, guid)
