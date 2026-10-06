@@ -68,12 +68,14 @@ def _restrict_windows_path(path: str, suffix: str) -> None:
         *(f"{grant}:{suffix}" for grant in grants),
     ]
     try:
-        # CREATE_NO_WINDOW：服务 /pythonw 下跑时不要弹黑框
+        # CREATE_NO_WINDOW：服务 /pythonw 下跑时不要弹黑框。
+        # 必须用 getattr 读：这个常量**只在 Windows 上存在**，CI（Linux）上直接写属性名
+        # mypy 会报 attr-defined；POSIX 上 subprocess 又要求它恰好是 0。
         result = subprocess.run(
             command,
             capture_output=True,
             check=False,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except OSError as error:
         _logger.warning("无法收紧 %s 的 ACL：%s", path, error)
