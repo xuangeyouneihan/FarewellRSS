@@ -84,6 +84,10 @@
   "loadFailed": "加载失败",
 
   "originalArticle": "原文",
+  "embedLoad": "点击加载内嵌内容",
+  "embedOpen": "在新窗口打开",
+  "embedConfirm": "将从 {host} 加载第三方内容",
+  "embedAllow": "允许并加载",
   "starredActive": "★ 已收藏",
   "star": "☆ 收藏",
   "selectCategory": "选择分类",

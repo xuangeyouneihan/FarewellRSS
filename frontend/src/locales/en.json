@@ -84,6 +84,10 @@
   "loadFailed": "Failed to load",
 
   "originalArticle": "Original",
+  "embedLoad": "Click to load embedded content",
+  "embedOpen": "Open in new tab",
+  "embedConfirm": "Will load third-party content from {host}",
+  "embedAllow": "Allow and load",
   "starredActive": "★ Starred",
   "star": "☆ Star",
   "selectCategory": "Select category",

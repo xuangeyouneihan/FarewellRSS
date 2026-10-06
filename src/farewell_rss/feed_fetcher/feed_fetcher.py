@@ -54,6 +54,34 @@ _ACCEPT = (
 )
 
 
+def _allow_embedded_players() -> None:
+    """把 `iframe` 加进 feedparser 的 HTML 白名单。
+
+    feedparser 默认会对条目 HTML 走一遍消毒（`sanitize_html=True`），而它的元素白名单里
+    **没有 iframe** —— 于是源站内嵌的播放器（RSSHub 的哔哩哔哩就是 `<iframe>`）在入库前
+    就被删掉了，日志里也什么都没有。这个策略还不可配置，只能从它的白名单上补。
+
+    只额外放行 iframe，其余保持它的默认：`script`、内联事件属性（`onclick` 等）、
+    `srcdoc` 依旧在**入库时**就被清掉 —— 别把活动内容存进库、再原样发给第三方客户端。
+    （我们自己的前端另有一层消毒，那份在渲染时按白名单放 iframe。）
+
+    这是 feedparser 的内部结构（`_HTMLSanitizer.acceptable_elements` 是个类属性），所以
+    整个动作包在 try 里：将来它变了只记一条 warning 降级（看不到内嵌播放器），而不是让
+    抓取整个起不来。`feed_fetcher_test.py` 里有用例盯着它，真变了测试会红。
+    """
+    try:
+        from feedparser import sanitizer
+
+        sanitizer._HTMLSanitizer.acceptable_elements.add("iframe")
+    except Exception:
+        _logger.warning(
+            "无法为 feedparser 的白名单添加 iframe，内嵌播放器会被过滤掉", exc_info=True
+        )
+
+
+_allow_embedded_players()
+
+
 class FetchError(Exception):
     """RSS 源抓取失败（网络错误等）"""
 

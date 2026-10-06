@@ -693,3 +693,85 @@ class TestInsecureCredentials:
             await fetch("http://example.com/feed.xml")
 
         assert not [r for r in caplog.records if self._is_insecure_warning(r)]
+
+
+# ─── 内嵌播放器（2026-10-06）─────────────────────────────────────────────
+
+# 照抄 RSSHub 哔哩哔哩路由的真实形状：整个播放器 HTML 被转义放在 <description> 里，
+# URL 里的 & 是双重转义的。width/height 得有，前端要靠它算宽高比。
+RSSHUB_BILIBILI_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>某人的哔哩哔哩合集</title>
+    <link>https://space.bilibili.com/3969839</link>
+    <description>合集</description>
+    <item>
+      <title>抽象新闻：9月人类迷惑行为大赏（中）</title>
+      <link>https://www.bilibili.com/video/BV1raaZ6EEQa</link>
+      <guid isPermaLink="false">https://www.bilibili.com/video/BV1raaZ6EEQa</guid>
+      <description>&lt;iframe width="640" height="360" src="https://www.bilibili.com/blackboard/html5mobileplayer.html?aid=117358924399048&amp;amp;cid=undefined&amp;amp;bvid=BV1raaZ6EEQa" frameborder="0" allowfullscreen="" referrerpolicy="no-referrer"&gt;&lt;/iframe&gt;&lt;br&gt;&lt;img src="https://i0.hdslb.com/bfs/archive/5762c762e415b0b0bc4d48108176ad3705e1723d.jpg"&gt;&lt;br&gt;</description>
+    </item>
+  </channel>
+</rss>"""
+
+# 同一份源里混进活动内容：脚本、内联事件、srcdoc 包裹的脚本
+HOSTILE_FEED_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>恶意源</title>
+    <link>https://evil.example</link>
+    <description>x</description>
+    <item>
+      <title>标题</title>
+      <link>https://evil.example/1</link>
+      <guid isPermaLink="false">evil-1</guid>
+      <description>&lt;p onclick="alert(1)"&gt;正文&lt;/p&gt;&lt;script&gt;alert(2)&lt;/script&gt;&lt;iframe srcdoc="&amp;lt;script&amp;gt;alert(3)&amp;lt;/script&amp;gt;"&gt;&lt;/iframe&gt;</description>
+    </item>
+  </channel>
+</rss>"""
+
+
+class TestEmbeddedPlayers:
+    """源站内嵌的播放器要活着走到库里
+
+    feedparser 默认会对条目 HTML 走一遍消毒，而它的元素白名单里没有 iframe —— 于是
+    RSSHub 的哔哩哔哩播放器在入库前就被删掉了（实测：同一份 XML，summary 从 363 字节
+    变成 103 字节，只剩封面图）。这里盯着"iframe 能进来"和"活动内容仍被挡住"两件事。
+    """
+
+    async def test_bilibili_player_survives_parsing(self):
+        result = await _run_fetch_with_xml(RSSHUB_BILIBILI_XML)
+
+        assert result is not None
+        summary = result.entries[0].summary or ""
+        assert "<iframe" in summary, "内嵌播放器被过滤掉了"
+        assert "html5mobileplayer.html" in summary
+        assert "bvid=BV1raaZ6EEQa" in summary
+        # 宽高比是前端算 aspect-ratio 的依据，丢了就只能退回 16:9
+        assert 'width="640"' in summary
+        assert 'height="360"' in summary
+
+    async def test_script_and_event_handlers_are_still_stripped(self):
+        """放行的只有 iframe：脚本 / 内联事件 / srcdoc 仍在入库时就被清掉"""
+        result = await _run_fetch_with_xml(HOSTILE_FEED_XML)
+
+        assert result is not None
+        summary = result.entries[0].summary or ""
+        assert "正文" in summary
+        assert "alert(" not in summary
+        assert "onclick" not in summary
+        assert "srcdoc" not in summary
+        assert "<script" not in summary
+
+    def test_feedparser_sanitizer_whitelist_is_still_patchable(self):
+        """feedparser 升级后若白名单结构变了，这条会红 —— 别让内嵌播放器静默消失
+
+        `_HTMLSanitizer.acceptable_elements` 是私有类属性，我们的补丁打在它上面。
+        """
+        from feedparser import sanitizer
+
+        elements = sanitizer._HTMLSanitizer.acceptable_elements
+        attributes = sanitizer._HTMLSanitizer.acceptable_attributes
+        assert "iframe" in elements
+        assert "script" not in elements
+        assert "srcdoc" not in attributes

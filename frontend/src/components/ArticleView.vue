@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import DOMPurify from "dompurify";
 import { NButton, NScrollbar, NSelect, useMessage } from "naive-ui";
 import { useStreamStore } from "@/stores/stream";
 import { useSubscriptionsStore } from "@/stores/subscriptions";
@@ -12,6 +11,13 @@ import {
   type LabelType,
 } from "@/types/greader";
 import CreateLabelModal from "@/components/CreateLabelModal.vue";
+import {
+  createEmbedConfirm,
+  createEmbedFrame,
+  playableUrl,
+  sanitizeArticleHtml,
+} from "@/utils/sanitize";
+import { hasEmbedConsent, rememberEmbedConsent } from "@/utils/embedConsent";
 import { t } from "@/i18n";
 
 defineProps<{ showBack?: boolean; compact?: boolean }>();
@@ -24,8 +30,72 @@ const message = useMessage();
 const currentItem = computed(() => stream.currentItem());
 
 const currentItemHtml = computed(() =>
-  currentItem.value ? DOMPurify.sanitize(currentItem.value.summary.content) : "",
+  currentItem.value
+    ? sanitizeArticleHtml(currentItem.value.summary.content, {
+        load: t("embedLoad"),
+        open: t("embedOpen"),
+      })
+    : "",
 );
+
+/** 当前条目的源（`feed/12` 这种）—— 同意按源记 */
+const currentFeedId = computed(() => currentItem.value?.origin.streamId ?? "");
+
+/** 确认行 → 它替掉的那个占位器，点「取消」时原样换回来 */
+const replacedPlaceholders = new WeakMap<HTMLElement, HTMLElement>();
+
+/**
+ * 正文里的占位器是 v-html 注入的，挂不上 Vue 事件，所以用委托。
+ *
+ * 三道口：点「加载」→（第一次先问一次来源）→ 允许后才真的插 iframe。每一道都重新验
+ * 一遍地址，而且**不信任 DOM 里的文字**：占位器（包括它显示的域名）是能被源站伪造的，
+ * 所以确认行上的域名是从校验过的地址现算的。
+ */
+function onBodyClick(event: MouseEvent) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const embed = target.closest<HTMLElement>(".embed");
+  if (!embed) return;
+
+  const url = playableUrl(embed.dataset.embed ?? "");
+  const ratio = embed.dataset.embedRatio ?? "";
+
+  if (target.closest(".embed-load")) {
+    event.preventDefault();
+    if (url === null) return;
+    const frame = createEmbedFrame(url, ratio);
+    if (!frame) return;
+
+    if (hasEmbedConsent(currentFeedId.value)) {
+      // 换掉整行，而不是塞进去：占位器那圈边框内边距不该留在播放器外面
+      embed.replaceWith(frame);
+      return;
+    }
+
+    const confirm = createEmbedConfirm(url, ratio, {
+      message: t("embedConfirm", { host: new URL(url).host }),
+      allow: t("embedAllow"),
+      cancel: t("cancel"),
+    });
+    replacedPlaceholders.set(confirm, embed);
+    embed.replaceWith(confirm);
+    return;
+  }
+
+  if (target.closest(".embed-allow")) {
+    if (url === null) return;
+    const frame = createEmbedFrame(url, ratio);
+    if (!frame) return;
+    rememberEmbedConsent(currentFeedId.value);
+    embed.replaceWith(frame);
+    return;
+  }
+
+  if (target.closest(".embed-cancel")) {
+    const placeholder = replacedPlaceholders.get(embed);
+    if (placeholder) embed.replaceWith(placeholder);
+  }
+}
 
 const starred = computed(() => currentItem.value !== null && isStarred(currentItem.value));
 
@@ -194,7 +264,7 @@ async function onTagChange(value: string): Promise<void> {
           </n-button>
         </div>
       </header>
-      <div class="article-body" v-html="currentItemHtml"></div>
+      <div class="article-body" v-html="currentItemHtml" @click="onBodyClick"></div>
       <div class="article-footer">
         <n-button
           size="small"
@@ -309,6 +379,67 @@ async function onTagChange(value: string): Promise<void> {
 .article-body :deep(img) {
   max-width: 100%;
   height: auto;
+}
+
+/* 内嵌内容的占位器、确认行与真正插入的 iframe，标记由 utils/sanitize.ts 生成，所以要 :deep */
+.article-body :deep(.embed) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--app-text-3);
+}
+
+.article-body :deep(.embed-load),
+.article-body :deep(.embed-open) {
+  color: var(--app-primary);
+  text-decoration: none;
+}
+
+.article-body :deep(.embed-load) {
+  font-weight: 600;
+}
+
+.article-body :deep(.embed-load:hover),
+.article-body :deep(.embed-open:hover) {
+  text-decoration: underline;
+}
+
+/* 把「在新窗口打开」推到右边 */
+.article-body :deep(.embed-host) {
+  margin-right: auto;
+}
+
+.article-body :deep(.embed-confirm-text) {
+  margin-right: auto;
+}
+
+.article-body :deep(.embed-allow),
+.article-body :deep(.embed-cancel) {
+  padding: 2px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: none;
+  color: var(--app-text-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.article-body :deep(.embed-allow) {
+  border-color: var(--app-primary);
+  color: var(--app-primary);
+}
+
+.article-body :deep(.embed-frame) {
+  display: block;
+  margin: 14px 0;
+  border-radius: 8px;
+  background: #000;
 }
 
 .placeholder {
