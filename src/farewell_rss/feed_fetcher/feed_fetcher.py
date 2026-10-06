@@ -42,8 +42,10 @@ FETCH_TIMEOUT = float(os.getenv("FAREWELL_RSS_FEED_FETCH_TIMEOUT", "30"))
 _FETCH_CONNECT_TIMEOUT = 10.0
 _FETCH_READ_TIMEOUT = 10.0
 
-# 跳转次数上限，与 SimplePie 的默认值一致
-_MAX_REDIRECTS = 5
+# 跳转次数上限，与**旧实现一致**：urllib 的 `HTTPRedirectHandler.max_redirections` 就是 10。
+# 必须显式给一个数，因为 httpx 的默认是 20 —— 不写等于悄悄放宽。httpx 没有 urllib 那个
+# 「同一地址出现 4 次就判循环」的检测，只数总次数，所以别把它调得比 10 还大。
+_MAX_REDIRECTS = 10
 
 # 与 feedparser 自带的默认值一致（feedparser.http.ACCEPT_HEADER）
 _ACCEPT = (
