@@ -345,3 +345,74 @@ async def test_run_survives_a_bad_cycle(file_session_factory, monkeypatch, caplo
     assert cycles.count("update") >= 2, "第一轮抛异常后 while True 就退出了"
     assert cycles.count("cleanup") >= 1, "刷新出错不该连累清理"
     assert any("刷新订阅源时出错" in r.getMessage() for r in caplog.records)
+
+
+# ─── 重叠刷新与卡死（2026-10-06，线上调度器停摆之后）────────────────────
+
+
+async def test_overlapping_rounds_run_only_once(monkeypatch, caplog):
+    """两轮刷新重叠时只跑一轮
+
+    线上真见过：导入 OPML 触发的刷新和调度器 tick 同时跑，两边都在打「距上次完整抓取
+    已超过 86400 秒」——同一批源被同时抓两遍，还会互相推翻对方的时间戳判断。
+    """
+    caplog.set_level(logging.INFO, logger="farewell_rss.scheduler.scheduler")
+    started = asyncio.Event()
+    release = asyncio.Event()
+    rounds: list[str] = []
+
+    async def slow_round() -> None:
+        rounds.append("round")
+        started.set()  # 告诉测试「这一轮已经拿到锁了」
+        await release.wait()
+
+    monkeypatch.setattr(scheduler, "_update_all_feeds_locked", slow_round)
+
+    first = asyncio.create_task(scheduler.update_all_feeds())
+    await started.wait()
+    await scheduler.update_all_feeds()  # 第二轮：不等第一轮，直接跳过
+    release.set()
+    await first
+
+    assert rounds == ["round"]
+    assert any("已有一轮刷新在进行中" in r.getMessage() for r in caplog.records)
+
+
+async def test_stuck_feed_does_not_hang_the_round(
+    file_session_factory, monkeypatch, caplog
+):
+    """某个源卡住时，这一轮照样要结束
+
+    线上那次的症状：run() 卡在一轮里，之后 8 小时零 tick（Web 还活着、进程没重启）。
+    抓取层已经有网络超时，这里是最后一道：无论 `update` 里挂了什么，都要有上界。
+    """
+    await _seed_subscribed_feeds(file_session_factory, 1)
+    monkeypatch.setattr(scheduler, "SessionLocal", file_session_factory)
+    monkeypatch.setattr(scheduler, "_FEED_TIMEOUT", 0.05)
+    caplog.set_level(logging.WARNING, logger="farewell_rss.scheduler.scheduler")
+
+    async def stuck_fetch(url, etag=None, modified=None):
+        await asyncio.sleep(30)  # 「连上了但不回包」：旧写法在这里永久挂住
+
+    monkeypatch.setattr(feed_service_module, "fetch", stuck_fetch)
+
+    # 卡住的话这里会自己超时失败，不用等 30 秒
+    await asyncio.wait_for(scheduler.update_all_feeds(), timeout=5)
+
+    entries, refreshed = await _written(file_session_factory)
+    assert entries == 0
+    assert refreshed == 0, "超时的源不该被标成『抓过了』"
+    assert any("仍未结束" in r.getMessage() for r in caplog.records)
+
+
+async def test_slow_feed_is_reported(file_session_factory, monkeypatch, caplog):
+    """拖住这一轮的源必须留下痕迹（线上排查时日志里什么都没有）"""
+    await _seed_subscribed_feeds(file_session_factory, 1)
+    monkeypatch.setattr(scheduler, "SessionLocal", file_session_factory)
+    monkeypatch.setattr(scheduler, "_SLOW_FEED_WARN", 0.0)
+    monkeypatch.setattr(feed_service_module, "fetch", _fake_fetch(delay=0.01))
+    caplog.set_level(logging.WARNING, logger="farewell_rss.scheduler.scheduler")
+
+    await scheduler.update_all_feeds()
+
+    assert any("本轮耗时" in r.getMessage() for r in caplog.records)

@@ -1,12 +1,16 @@
 import asyncio
+import base64
 import html
 import logging
+import os
 import platform
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 
 import feedparser  # type: ignore[import-untyped]
+import httpx
 
 from .._version import __version__
 
@@ -20,9 +24,102 @@ _REPO = "https://github.com/xuangeyouneihan/FarewellRSS"
 # 一些 WAF 专门拦它，实测 `free.apprcn.com/feed/` 回 403（换自己的 UA 就是 200 + 3 条）。
 _AGENT = f"FarewellRSS/{__version__} ({platform.system()}; {_REPO})"
 
+# 一次抓取的时间预算（秒），三层各管一段：
+#   FETCH_TIMEOUT          整次抓取的硬上限（建连 + 跳转 + 读 body），用 asyncio.timeout 表达
+#   _FETCH_CONNECT_TIMEOUT 建连接（TCP + TLS）
+#   _FETCH_READ_TIMEOUT    等下一个数据块（注意是**每次读**，不是总时长）
+#
+# 为什么非要超时不可：线上实测过一次「调度器此后再无 tick」。改之前的写法是把 URL 交给
+# `feedparser.parse()`，它内部走 urllib 且不传 timeout，而 socket 的默认超时是「永不超时」
+# —— 一个连上了却再也不回包的源会把那个线程永久占住（默认执行器的线程数有限且全局共享，
+# 连密码哈希都得排队）；于是整轮刷新的 `gather` 永不返回，而 `run()` 的 try/except 只挡
+# 异常、挡不住挂死：进程还活着，只是再也不刷新了。
+#
+# 超时交给 httpx（走事件循环）而不是「另开线程 + 事后取消」：httpx 的超时会真的把 socket
+# 关掉，`asyncio.timeout` 也就真能取消它；`to_thread` 那种写法里取消只是「不等了」，
+# 线程还在 socket 上挂着。参考 SimplePie：它从 2004 年起就默认带 10 秒超时。
+FETCH_TIMEOUT = float(os.getenv("FAREWELL_RSS_FEED_FETCH_TIMEOUT", "30"))
+_FETCH_CONNECT_TIMEOUT = 10.0
+_FETCH_READ_TIMEOUT = 10.0
+
+# 跳转次数上限，与 SimplePie 的默认值一致
+_MAX_REDIRECTS = 5
+
+# 与 feedparser 自带的默认值一致（feedparser.http.ACCEPT_HEADER）
+_ACCEPT = (
+    "application/atom+xml,application/rdf+xml,application/rss+xml,"
+    "application/xml;q=0.9,text/xml;q=0.2,*/*;q=0.1"
+)
+
 
 class FetchError(Exception):
     """RSS 源抓取失败（网络错误等）"""
+
+
+def _split_credentials(url: str) -> tuple[str, str | None]:
+    """URL 里的 `user:pass@` 拆成「干净的 URL + Authorization 头」
+
+    httpx 不会把 URL 里的凭据转成 Authorization（实测 0.28.1：build_request 出来的
+    authorization 是空的），直接发出去等于把凭据丢掉、然后白吃一个 401。
+
+    凭据先按 RFC 3986 解码再拼进 Basic 头：`me%2Bfeeds` 送出去的是 `me+feeds`。
+    """
+    parts = urllib.parse.urlsplit(url)
+    if parts.username is None:
+        return url, None
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    clean = urllib.parse.urlunsplit((
+        parts.scheme,
+        host,
+        parts.path,
+        parts.query,
+        parts.fragment,
+    ))
+    # userinfo 是百分号编码的，而 urllib 的 .username / .password **不解码**（`me%2Bfeeds`
+    # 会原样送出去 → 服务端必然 401；feedparser 也踩在这一点上），httpx 的 `URL.username`
+    # 才会解。这里刻意继续用 urllib：clean_url 要尽量原样保留（href 是订阅的去重键，
+    # 不能让 httpx 的 URL 规范化改写它），所以解码只做在凭据这一步。
+    username = urllib.parse.unquote(parts.username)
+    password = urllib.parse.unquote(parts.password or "")
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return clean, f"Basic {token}"
+
+
+async def _request(
+    url: str, authorization: str | None, etag: str | None, modified: str | None
+) -> httpx.Response:
+    """GET 一次源；传输层失败（DNS、连接、TLS、超时、跳转过多）一律抛 `FetchError`
+
+    非 2xx **不抛异常**：304 和 4xx/5xx 都是有意义的结果，怎么处理留给 `fetch`。
+
+    **每次抓取建一个 client。** 连接池在这里本来也没有复用机会（不同源基本是不同主机，
+    同一轮里每个源也只抓一次），换来的是不用管生命周期：模块级单例会绑事件循环，
+    测试里每个用例一个新 loop 就炸了。
+    """
+    headers = {"User-Agent": _AGENT, "Accept": _ACCEPT}
+    if authorization:
+        headers["Authorization"] = authorization
+    if etag:
+        headers["If-None-Match"] = etag
+    if modified:
+        headers["If-Modified-Since"] = modified
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                FETCH_TIMEOUT, connect=_FETCH_CONNECT_TIMEOUT, read=_FETCH_READ_TIMEOUT
+            ),
+            follow_redirects=True,
+            max_redirects=_MAX_REDIRECTS,
+        ) as client:
+            return await client.get(url, headers=headers)
+    except httpx.TimeoutException as error:
+        _logger.warning("订阅源 %s 抓取超时：%s", url, error)
+        raise FetchError(url) from error
+    except (httpx.HTTPError, httpx.InvalidURL) as error:
+        _logger.warning("订阅源 %s 抓取失败：%s", url, error)
+        raise FetchError(url) from error
 
 
 @dataclass
@@ -198,43 +295,68 @@ def _to_html(text: str | None) -> str | None:
 
 
 async def fetch(
-    url: str, etag: str | None = None, modified: str | None = None
+    url: str,
+    etag: str | None = None,
+    modified: str | None = None,
 ) -> FetchedFeed | None:
     """获取 RSS 源
 
     抓取失败（传输层、HTTP 层）一律抛 `FetchError`；返回 `None` 只表示两件事：
     304 未修改，或者 2xx 且这个源目前确实没有条目 —— 调用方据此决定要不要 touch。
-    """
-    raw_feed = None
-    try:
-        raw_feed = await asyncio.to_thread(
-            feedparser.parse, url, etag=etag, modified=modified, agent=_AGENT
-        )
-    except Exception as e:
-        _logger.exception("订阅源 %s 获取失败", url)
-        raise FetchError(url) from e
 
-    status = raw_feed.get("status")
-    if status is None:
-        # 传输层失败（TLS 校验、DNS、连接、超时）：feedparser 只在结果里留下
-        # bozo_exception，**连 status 都不设**，所以不能直接取 raw_feed.status。
+    超时不开放成参数（测试要快就 monkeypatch 那几个模块常量）：它是 socket / 事件循环
+    层面的预算，由这里用 `asyncio.timeout` 表达，而不是让每个调用方各自传一个数字。
+
+    feedparser 只负责解析：响应体和响应头一起交给它，相对链接靠 `content-location`
+    （最终地址）解析。
+    """
+    try:
+        clean_url, authorization = _split_credentials(url)
+    except ValueError as error:
+        # 比如 `http://host:不是端口/feed`：`_is_http_url` 拦不住（urlparse 不校验端口），
+        # 到取 port 时才炸。按抓取失败处理，别让它变成每轮一条未捕获异常。
+        _logger.warning("订阅源 %s 地址不合法：%s", url, error)
+        raise FetchError(url) from error
+
+    try:
+        # 整次抓取的硬上限：httpx 的 read 超时只约束「每次读」，两次读之间可以无限长
+        async with asyncio.timeout(FETCH_TIMEOUT):
+            response = await _request(clean_url, authorization, etag, modified)
+    except TimeoutError as error:
         _logger.warning(
-            "订阅源 %s 抓取失败，没有拿到响应：%s", url, raw_feed.get("bozo_exception")
+            "订阅源 %s 超过 %.0f 秒仍未抓完，放弃本次抓取", url, FETCH_TIMEOUT
         )
-        raise FetchError(url)
+        raise FetchError(url) from error
+
+    status = response.status_code
+    headers = dict(response.headers)  # httpcore 已经全小写了
     if status == 304:
         _logger.debug("订阅源 %s 未修改", url)
         return None
-    if status >= 400:
-        # 403（WAF / 防盗链）、404（源已失效）、5xx（上游故障）：feedparser 会把错误页
-        # 也喂给解析器，于是 entries 为空 —— 必须在这里拦住，否则会被当成「源没有条目」。
+    if not 200 <= status < 300:
+        # 403（WAF / 防盗链）、404（源已失效）、5xx（上游故障）：错误页也能解析出「零条目」，
+        # 必须在这里拦住，否则会被当成「源没有条目」。
+        # 3xx 落到这里只有两种情况：带 Location 的真跳转 httpx 已经跟完了（跟不完会抛
+        # TooManyRedirects），剩下的是**没有 Location 的 3xx**（坏服务端 / 门户网关），
+        # 以及 300/305 这类 httpx 不认的重定向 —— 同样是「没拿到源」，不能放它变成
+        # touch()。
         _logger.warning(
             "订阅源 %s 返回 HTTP %d（content-type: %s），本次抓取失败",
             url,
             status,
-            raw_feed.headers.get("content-type"),
+            headers.get("content-type"),
         )
         raise FetchError(url)
+
+    raw_feed = feedparser.parse(
+        response.content,
+        response_headers={
+            **headers,
+            # parse() 收到的是字节，它不知道这些字节是从哪来的：条目里的相对链接
+            # （图片、站内地址）要靠这个头才能拼成绝对地址
+            "content-location": str(response.url),
+        },
+    )
     if raw_feed.bozo and raw_feed.entries:
         # 有条目还能解析出来：宽进严出，照常返回，只留一条警告
         _logger.warning(
@@ -247,7 +369,7 @@ async def fetch(
             _logger.warning(
                 "订阅源 %s 没有条目，且解析异常（content-type: %s）：拿到的可能不是 feed",
                 url,
-                raw_feed.headers.get("content-type"),
+                headers.get("content-type"),
             )
         else:
             _logger.info("订阅源 %s 没有条目", url)
@@ -278,9 +400,13 @@ async def fetch(
     ttl = raw_feed.feed.get("ttl")
 
     result = FetchedFeed(
-        href=raw_feed.href,
-        etag=raw_feed.get("etag"),
-        modified=raw_feed.get("modified"),
+        # 没跳转时用请求时的地址原样存：href 是订阅的去重键（也是 TTL 判断的输入），
+        # 不能因为 URL 规范化（大小写、百分号编码之类）而变样
+        href=str(response.url) if response.history else clean_url,
+        # etag / modified 从响应头拿（feedparser 只在它自己发请求时才会填这两个字段，
+        # 交给它字节的话它无从得知，增量更新的条件头就断了）
+        etag=headers.get("etag"),
+        modified=headers.get("last-modified"),
         title=feed_title,
         link=raw_feed.feed.get("link"),
         subtitle=feed_subtitle,

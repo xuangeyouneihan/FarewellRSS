@@ -13,6 +13,7 @@ dependencies = [
     "bcrypt>=5.0.0",
     "fastapi>=0.139.0",
     "feedparser>=6.0.12",
+    "httpx>=0.28.1",
     "python-multipart>=0.0.32",
     "sqlalchemy[asyncio]>=2.0.51",
     "uvicorn[standard]>=0.51.0",
@@ -99,7 +100,6 @@ asyncio_mode = "auto"
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "mypy==1.15.*",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",

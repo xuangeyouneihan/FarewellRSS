@@ -1,12 +1,14 @@
+import base64
+import contextlib
+import gzip
 import http.server
-import ssl
 import threading
 import time
-import urllib.error
 from datetime import UTC, datetime
 from unittest.mock import patch
 
 import feedparser
+import httpx
 import pytest
 
 from farewell_rss._version import __version__
@@ -21,6 +23,7 @@ from farewell_rss.feed_fetcher.feed_fetcher import (
     _parse_datetime,
     _parse_enclosure,
     _parse_tag,
+    _split_credentials,
     _strip_html,
     _to_html,
     fetch,
@@ -160,40 +163,143 @@ class TestToHtml:
         assert _to_html("") == ""
 
 
-# ─── fetch() 集成测试（mock 网络，真实 feedparser 解析）──────────────────
+class TestSplitCredentials:
+    def test_no_credentials(self):
+        """没有 userinfo 就原样返回（绝大多数源都是这样）"""
+        url = "https://example.com/feed.xml"
+
+        assert _split_credentials(url) == (url, None)
+
+    def test_strips_credentials_and_decodes_them(self):
+        """凭据要从 URL 里摘掉，而且要**先解码**再进 Basic 头
+
+        `me%2Bfeeds` 的真实用户名是 `me+feeds`。urllib 的 `.username` 不解码——直接把
+        编码串送出去，服务端比对的是解码后的值，必然 401（feedparser 也踩在这一点上）。
+        """
+        clean, authorization = _split_credentials(
+            "https://me%2Bfeeds:p%40ss@example.com/feed.xml"
+        )
+
+        assert clean == "https://example.com/feed.xml"
+        assert authorization == "Basic " + base64.b64encode(b"me+feeds:p@ss").decode()
+
+    def test_clean_url_keeps_path_query_and_fragment(self):
+        """clean_url 只摘凭据，其余部分原样保留
+
+        它是 `FetchedFeed.href` 的来源，而 href 是订阅的去重键——被规范化改写就会凭空
+        多出一行 feed。
+        """
+        clean, _ = _split_credentials(
+            "https://user:pw@example.com:8443/a/Feed.xml?q=1#frag"
+        )
+
+        assert clean == "https://example.com:8443/a/Feed.xml?q=1#frag"
 
 
-def _parsed_html_body() -> feedparser.FeedParserDict:
-    """复现「拿到的是 HTML 而不是 feed」：feedparser 会置 bozo=NonXMLContentType"""
-    return feedparser.parse(
-        b"<html><body>challenge</body></html>",
-        response_headers={"content-type": "text/html"},
+# ─── fetch() 测试（真实 feedparser 解析）──────────────────────────────
+#
+# 抓取层走 httpx：能真起服务端验的（UA、条件头、跳转、压缩、超时、凭据）就真起一个
+# 本地 HTTP 服务端；只关心状态码分支的用例，把网络边界 `_request` 换成造好的响应。
+
+_RESPONSE_URL = "https://example.com/feed.xml"
+
+
+def _stub_response(
+    body: bytes = b"",
+    *,
+    status: int = 200,
+    headers: dict[str, str] | None = None,
+    url: str = _RESPONSE_URL,
+) -> httpx.Response:
+    """造一个不碰网络的 httpx.Response（`request` 是它算 `.url` 的必需项）"""
+    return httpx.Response(
+        status,
+        content=body,
+        headers=headers or {},
+        request=httpx.Request("GET", url),
     )
 
 
-async def _run_fetch_with_parsed(
-    parsed: feedparser.FeedParserDict,
-) -> FetchedFeed | None:
-    """用预先造好的 feedparser 结果替换网络请求，调用 fetch()。"""
+@contextlib.contextmanager
+def _patched_request(response: httpx.Response | Exception):
+    """把网络边界（`_request`）换成这个响应或异常
 
-    async def fake_to_thread(func, *args, **kwargs):
-        return parsed
+    替换的是 `_request` 而不是 httpx 本身：状态码分支、href / etag 的取值、解析全在
+    我们自己的代码里，这些才是要测的东西。
+    """
 
-    with patch("asyncio.to_thread", fake_to_thread):
-        return await fetch("https://example.com/feed.xml")
+    async def fake_request(*args, **kwargs):
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    with patch.object(feed_fetcher_module, "_request", fake_request):
+        yield
 
 
 async def _run_fetch_with_xml(xml: str) -> FetchedFeed | None:
-    """用 XML 字符串替换网络请求，调用 fetch()。"""
-    parsed = feedparser.parse(xml)
-    # feedparser 直接解析字符串时不设这些属性，需要手动补
-    parsed["status"] = 200
-    parsed["href"] = "https://example.com/feed.xml"
-    if "etag" not in parsed:
-        parsed["etag"] = None
-    if "modified" not in parsed:
-        parsed["modified"] = None
-    return await _run_fetch_with_parsed(parsed)
+    """一份 XML 走完整个 fetch()（真实 feedparser 解析）"""
+    with _patched_request(
+        _stub_response(xml.encode(), headers={"content-type": "application/rss+xml"})
+    ):
+        return await fetch(_RESPONSE_URL)
+
+
+class _QuietServer(http.server.ThreadingHTTPServer):
+    """测试用服务端：客户端提前放弃（超时用例）时别喷 traceback"""
+
+    def handle_error(self, request, client_address):
+        pass
+
+
+class _QuietHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+@contextlib.contextmanager
+def _http_server(handler: type[http.server.BaseHTTPRequestHandler]):
+    """起一个本地 HTTP 服务端，yield 它的 base URL"""
+    server = _QuietServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+
+
+def _rss_handler(
+    body: bytes = RSS_XML.encode(),
+    *,
+    status: int = 200,
+    content_type: str = "application/rss+xml",
+    extra_headers: dict[str, str] | None = None,
+    seen: dict[str, str | None] | None = None,
+):
+    """造一个「只回一份固定内容」的 handler（顺手把收到的相关请求头记进 seen）"""
+
+    class Handler(_QuietHandler):
+        def do_GET(self):
+            if seen is not None:
+                for name in (
+                    "User-Agent",
+                    "If-None-Match",
+                    "If-Modified-Since",
+                    "Authorization",
+                ):
+                    seen[name.lower()] = self.headers.get(name)
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
+            # 304 按定义没有响应体，也就不能带 Content-Length
+            if status != 304:
+                self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if status != 304:
+                self.wfile.write(body)
+
+    return Handler
 
 
 class TestFetchRss:
@@ -256,57 +362,69 @@ class TestUserAgent:
 class TestFetchEdgeCases:
     async def test_empty_feed(self):
         """无条目的 RSS 返回 None"""
-        result = await _run_fetch_with_xml(EMPTY_FEED_XML)
-        assert result is None
+        assert await _run_fetch_with_xml(EMPTY_FEED_XML) is None
 
     async def test_not_modified(self):
         """304 未修改返回 None（增量更新靠它，不算失败）"""
-        parsed = feedparser.parse(RSS_XML)
-        parsed["status"] = 304
+        with _patched_request(_stub_response(status=304)):
+            assert await fetch(_RESPONSE_URL) is None
 
-        assert await _run_fetch_with_parsed(parsed) is None
+    async def test_transport_failure_raises_fetch_error(self):
+        """传输层失败（拒连 / 证书 / DNS）都变成 FetchError
 
-    async def test_transport_error_without_status(self):
-        """传输层失败（证书/DNS/连接/超时）时 feedparser 连 status 都不设。
-
-        修之前这里会因 `raw_feed.status` 抛 AttributeError —— 网络失败被伪装成代码 bug。
-        真实案例：https://www.sitstars.com/feed/ 的证书过期。
+        真实案例：https://www.sitstars.com/feed/ 的证书过期。旧实现靠「feedparser
+        连 status 都不设」来识别它（修之前还会先抛 AttributeError，把网络失败伪装成
+        代码 bug）；这里连一个没人监听的端口，走的是 httpx 的 ConnectError。
         """
-        parsed = feedparser.parse(EMPTY_FEED_XML)
-        assert "status" not in parsed
-        parsed["bozo"] = True
-        parsed["bozo_exception"] = urllib.error.URLError(
-            ssl.SSLCertVerificationError("certificate has expired")
-        )
-
         with pytest.raises(FetchError):
-            await _run_fetch_with_parsed(parsed)
+            await fetch("http://127.0.0.1:1/feed")
+
+    async def test_too_many_redirects_is_a_fetch_error(self):
+        """跳转打转（超过 max_redirects）算抓取失败，不能当成「源没有条目」"""
+
+        class Handler(_QuietHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "/loop")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        with _http_server(Handler) as base, pytest.raises(FetchError):
+            await fetch(f"{base}/loop")
 
     async def test_http_error(self):
         """403/404/5xx 抛 FetchError：错误页不能被当成「源没有条目」"""
-        parsed = _parsed_html_body()
-        parsed["status"] = 403
+        challenge = _stub_response(
+            b"<html><body>challenge</body></html>",
+            status=403,
+            headers={"content-type": "text/html"},
+        )
 
-        with pytest.raises(FetchError):
-            await _run_fetch_with_parsed(parsed)
+        with _patched_request(challenge), pytest.raises(FetchError):
+            await fetch(_RESPONSE_URL)
 
     async def test_unparsable_body_without_entries(self):
         """2xx + 解析异常 + 无条目：行为不变（仍返回 None），只是日志能分辨了"""
-        parsed = _parsed_html_body()
-        parsed["status"] = 200
-        assert parsed.bozo
+        challenge = _stub_response(
+            b"<html><body>challenge</body></html>",
+            headers={"content-type": "text/html"},
+        )
 
-        assert await _run_fetch_with_parsed(parsed) is None
+        with _patched_request(challenge):
+            assert await fetch(_RESPONSE_URL) is None
 
-    async def test_network_error(self):
-        """网络异常应抛 FetchError"""
+    async def test_invalid_url_is_a_fetch_error(self):
+        """端口不是数字：`_is_http_url` 拦不住（urlparse 不校验端口），到取 port 时才炸
 
-        async def fake_to_thread(func, *args, **kwargs):
-            raise OSError("连接超时")
+        不翻译成 FetchError 的话 `FeedService.update` 的 `except FetchError` 接不住，
+        每轮刷新都会冒一条未捕获异常。
+        """
+        with pytest.raises(FetchError):
+            await fetch("http://example.com:notaport/feed")
 
-        with patch("asyncio.to_thread", fake_to_thread):  # noqa: SIM117
-            with pytest.raises(FetchError):
-                await fetch("https://example.com/dead.xml")
+
+class TestFetchOverTheWire:
+    """真走一遍 HTTP（本地服务端）"""
 
     async def test_sends_own_user_agent(self):
         """抓取要带自己的 UA（`FarewellRSS/<版本> (<系统>; <仓库地址>)`）
@@ -317,29 +435,160 @@ class TestFetchEdgeCases:
         """
         seen: dict[str, str | None] = {}
 
-        class Handler(http.server.BaseHTTPRequestHandler):
+        with _http_server(_rss_handler(seen=seen)) as base:
+            result = await fetch(f"{base}/feed")
+
+        assert result is not None
+        agent = seen["user-agent"] or ""
+        assert agent == feed_fetcher_module._AGENT
+        assert agent.startswith("FarewellRSS/")
+        assert feed_fetcher_module._REPO in agent
+        assert "feedparser" not in agent
+
+    async def test_sends_conditional_headers(self):
+        """带了 etag / modified 就要发条件头（增量更新和假 304 兜底全靠它）"""
+        seen: dict[str, str | None] = {}
+
+        with _http_server(_rss_handler(status=304, seen=seen)) as base:
+            result = await fetch(
+                f"{base}/feed",
+                etag='"v1"',
+                modified="Wed, 01 Jan 2020 00:00:00 GMT",
+            )
+
+        assert result is None  # 304 → 未修改
+        assert seen["if-none-match"] == '"v1"'
+        assert seen["if-modified-since"] == "Wed, 01 Jan 2020 00:00:00 GMT"
+
+    async def test_decompresses_gzip(self):
+        """服务端 gzip 压缩：feedparser 拿到的必须是解压后的字节（httpx 替我们解）"""
+        with _http_server(
+            _rss_handler(
+                gzip.compress(RSS_XML.encode()),
+                extra_headers={"Content-Encoding": "gzip"},
+            )
+        ) as base:
+            result = await fetch(f"{base}/feed")
+
+        assert result is not None
+        assert result.title == "测试博客"
+
+    async def test_follows_redirect_and_keeps_the_final_url(self):
+        """跳转要跟到底：href（订阅的去重键）与条件头都取最终地址那一份"""
+
+        class Handler(_QuietHandler):
             def do_GET(self):
-                seen["ua"] = self.headers.get("User-Agent")
+                if self.path == "/old":
+                    self.send_response(302)
+                    self.send_header("Location", "/new")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 data = RSS_XML.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/rss+xml")
+                self.send_header("ETag", '"v2"')
+                self.send_header("Last-Modified", "Wed, 01 Jan 2020 00:00:00 GMT")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
 
-            def log_message(self, *args):  # 别往测试输出里喷日志
-                pass
-
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        try:
-            result = await fetch(f"http://127.0.0.1:{server.server_address[1]}/feed")
-        finally:
-            server.shutdown()
+        with _http_server(Handler) as base:
+            result = await fetch(f"{base}/old")
 
         assert result is not None
-        assert seen["ua"] == feed_fetcher_module._AGENT
-        assert seen["ua"] is not None
-        assert seen["ua"].startswith("FarewellRSS/")
-        assert feed_fetcher_module._REPO in seen["ua"]
-        assert "feedparser" not in seen["ua"]
+        assert result.href == f"{base}/new"
+        assert result.etag == '"v2"'
+        assert result.modified == "Wed, 01 Jan 2020 00:00:00 GMT"
+
+    async def test_basic_auth_in_url(self):
+        """URL 里的 `user:pass@` 要拆成 Authorization 头发出去
+
+        httpx 不会自己转（实测 0.28.1），不拆就是安静地把凭据丢掉、白吃一个 401。
+        """
+        seen: dict[str, str | None] = {}
+
+        with _http_server(_rss_handler(seen=seen)) as base:
+            host = base.removeprefix("http://")
+            result = await fetch(f"http://alice:s3cr3t@{host}/feed")
+
+        assert result is not None
+        token = base64.b64encode(b"alice:s3cr3t").decode()
+        assert seen["authorization"] == f"Basic {token}"
+
+    async def test_basic_auth_in_url_is_percent_decoded(self):
+        """URL 里的凭据是百分号编码的：要解码后再发
+
+        用 urllib 的 `.username` 拿到的是没解码的原串，直接把 `me%2Bfeeds` 丢进
+        Authorization 就是 401。
+        """
+        seen: dict[str, str | None] = {}
+
+        with _http_server(_rss_handler(seen=seen)) as base:
+            host = base.removeprefix("http://")
+            result = await fetch(f"http://me%2Bfeeds:p%40ss@{host}/feed")
+
+        assert result is not None
+        token = base64.b64encode(b"me+feeds:p@ss").decode()
+        assert seen["authorization"] == f"Basic {token}"
+
+    async def test_relative_links_resolve_against_the_feed_url(self):
+        """条目里的相对链接要拼成绝对地址
+
+        自己发请求之后，feedparser 拿到的只是字节、不知道这些字节从哪来 —— 位置靠
+        `content-location` 头（最终地址）传给它。
+        """
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>相对链接</title>
+  <link>/site</link>
+  <item>
+    <title>第一篇</title>
+    <guid>post-1</guid>
+    <link>/posts/1</link>
+    <description>&lt;img src="/img/a.png"&gt;</description>
+  </item>
+</channel></rss>"""
+
+        with _http_server(_rss_handler(xml.encode())) as base:
+            result = await fetch(f"{base}/feed")
+
+        assert result is not None
+        assert result.link == f"{base}/site"
+        entry = result.entries[0]
+        assert entry.link == f"{base}/posts/1"
+        assert f"{base}/img/a.png" in (entry.summary or "")
+
+
+class TestFetchTimeout:
+    """超时：不响应的源不能把这一轮刷新永久占住（线上就是这么卡死的）"""
+
+    class _NeverAnswers(_QuietHandler):
+        def do_GET(self):
+            time.sleep(5)  # 连上了，但一直不回包
+
+    async def test_read_timeout(self, monkeypatch):
+        """单次读超时：等响应 / 等下一个数据块不能无限期"""
+        monkeypatch.setattr(feed_fetcher_module, "_FETCH_READ_TIMEOUT", 0.3)
+
+        with _http_server(self._NeverAnswers) as base:
+            started = time.monotonic()
+            with pytest.raises(FetchError):
+                await fetch(f"{base}/feed")
+            elapsed = time.monotonic() - started
+
+        assert elapsed < 3, f"没按读超时放弃，等了 {elapsed:.1f} 秒"
+
+    async def test_total_timeout(self, monkeypatch):
+        """整次抓取的硬上限：read 超时只管「每次读」，管不住总时长"""
+        monkeypatch.setattr(feed_fetcher_module, "FETCH_TIMEOUT", 0.3)
+        monkeypatch.setattr(feed_fetcher_module, "_FETCH_READ_TIMEOUT", 30.0)
+        monkeypatch.setattr(feed_fetcher_module, "_FETCH_CONNECT_TIMEOUT", 30.0)
+
+        with _http_server(self._NeverAnswers) as base:
+            started = time.monotonic()
+            with pytest.raises(FetchError):
+                await fetch(f"{base}/feed")
+            elapsed = time.monotonic() - started
+
+        assert elapsed < 3, f"没按总时长放弃，等了 {elapsed:.1f} 秒"
