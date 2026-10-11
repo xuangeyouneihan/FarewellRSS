@@ -354,6 +354,20 @@ class FetchedFeed:
     entries: list[FetchedEntry] = field(default_factory=list)  # RSS 源条目列表
 
 
+def _updated_parsed(source):
+    """`updated_parsed`，缺失时退回 `published_parsed`
+
+    feedparser 6 为兼容 issue 310 的老行为，给「读 `updated_parsed` 但只有
+    `published_parsed`」做了个同义映射，而它**每读一次就发一条
+    DeprecationWarning**，并且明说这个回退将来会删掉。所以这个回退自己写：
+    `in` 走的是真实的存在性判断（`__contains__` 不做那个映射、也不告警），
+    取到的值与原来完全一致。
+    """
+    if "updated_parsed" in source:
+        return source["updated_parsed"]
+    return source.get("published_parsed")
+
+
 def _parse_datetime(Fetched) -> datetime | None:
     """将 feedparser 的 struct_time 转为 UTC datetime，None 安全"""
     if Fetched is None:
@@ -566,7 +580,7 @@ async def fetch(
         link=raw_feed.feed.get("link"),
         subtitle=feed_subtitle,
         published=_parse_datetime(raw_feed.feed.get("published_parsed")),
-        updated=_parse_datetime(raw_feed.feed.get("updated_parsed")),
+        updated=_parse_datetime(_updated_parsed(raw_feed.feed)),
         author=_parse_author(raw_feed.feed.get("author_detail")),
         icon=raw_feed.feed.get("icon")
         or raw_feed.feed.get("logo")
@@ -638,7 +652,7 @@ async def fetch(
                 title=entry_title,
                 link=entry.get("link"),
                 published=_parse_datetime(entry.get("published_parsed")),
-                updated=_parse_datetime(entry.get("updated_parsed")),
+                updated=_parse_datetime(_updated_parsed(entry)),
                 summary=entry_summary,
                 summary_plain=entry_summary_plain,
                 content=entry_content,

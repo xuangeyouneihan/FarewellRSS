@@ -13,27 +13,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out release
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
+      # setup-uv 从 v8 起不再发浮动 major 标签（最高只到 v7），所以这里钉全版本号，
+      # 升级要手动改（想看有没有新版：gh release list -R astral-sh/setup-uv）
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -49,7 +51,7 @@ jobs:
         run: uv build
 
       - name: Attach the Python wheel to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           token: ${{ github.token }}
           files: |
@@ -64,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out release
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
 
@@ -74,16 +76,16 @@ jobs:
         run: gh release download "${{ github.event.release.tag_name }}" --pattern "*.whl" --dir dist
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Extract release version
         id: version
@@ -91,7 +93,7 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -103,7 +105,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/farewell-rss:latest
 
       - name: Update Docker Hub overview
-        uses: peter-evans/dockerhub-description@v4
+        uses: peter-evans/dockerhub-description@v5
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}

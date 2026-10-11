@@ -314,6 +314,9 @@ def _http_server(handler: type[http.server.BaseHTTPRequestHandler]):
         yield f"http://127.0.0.1:{server.server_address[1]}"
     finally:
         server.shutdown()
+        # shutdown() 只停 serve_forever 循环，不关监听 socket —— 少了这句，
+        # socket 要等 GC 才回收，每个用例都会冒一条 ResourceWarning
+        server.server_close()
 
 
 def _rss_handler(

@@ -295,8 +295,11 @@ async def delete_account(
         await user_service.delete(target, operator)
     except LastAdminDeletionError as e:
         # 此处不记日志，因为日志在 UserService.delete 中已经记录了删除失败的详细信息
+        # 用新名：旧名 HTTP_422_UNPROCESSABLE_ENTITY 在 starlette 里已弃用，每请求都会发
+        # 一条 StarletteDeprecationWarning。新名自 starlette 0.48 起才有，而 fastapi 只声明
+        # starlette>=0.46.0（正常解析拿到的 starlette 远新于此）
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": type(e).__name__, "detail": str(e)},
         )
     # repository 只 flush，所以这次显式提交不能省：后台作业自建 session，
@@ -401,7 +404,7 @@ async def set_admin(
         )
     except LastAdminDeletionError as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": type(e).__name__, "detail": str(e)},
         )
     return Response("OK", media_type="text/plain")

@@ -42,7 +42,10 @@ def _probe(url: str) -> int | None:
         with urlopen(url, timeout=2) as response:
             return int(response.status)
     except HTTPError as error:  # HTTPError 是 URLError 的子类，必须先捕
-        return int(error.code)
+        # 它同时也是带 socket 的响应对象（继承自 urllib.response.addbase —— 即
+        # tempfile 那个包装类，没 close 就会在 GC 时报 ResourceWarning）
+        with error:
+            return int(error.code)
     except URLError, OSError:
         return None
 
