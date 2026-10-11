@@ -47,6 +47,14 @@ packages = ["src/farewell_rss"]
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
 
+# sdist 必须显式排除 node_modules。hatchling 只认**根**目录的 .gitignore，而 node_modules
+# 写在 frontend/.gitignore 里 —— 于是 16185 个文件、108MB 被打进 sdist（PyPI 上 0.1.11~0.1.14
+# 的 sdist 都是 28MB，而 wheel 只有 480KB）。更糟的是 pnpm 靠硬链接把包链进 node_modules，
+# tar 里因此带 2599 个 hard-link 成员，而新版 uv 解包时会拒绝 hard-link —— `uv build` 是
+# 「先出 sdist，再从 sdist 出 wheel」，于是直接失败（2026-10-11 CI 就是这么挂的）。
+[tool.hatch.build.targets.sdist]
+exclude = ["frontend/node_modules"]
+
 [tool.hatch.build.targets.sdist.force-include]
 "frontend/dist" = "frontend/dist"
 
