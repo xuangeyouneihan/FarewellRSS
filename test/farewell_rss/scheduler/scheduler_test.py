@@ -317,13 +317,18 @@ async def test_run_survives_a_bad_cycle(file_session_factory, monkeypatch, caplo
     monkeypatch.setattr(scheduler, "_REFRESH_INTERVAL", 0)
     caplog.set_level(logging.ERROR, logger="farewell_rss.scheduler.scheduler")
     cycles: list[str] = []
+    done = asyncio.Event()  # 凑满两轮就唤醒测试
 
     async def bad_update() -> None:
         cycles.append("update")
+        if len(cycles) >= 4:  # 至少跑满两轮
+            done.set()
         raise RuntimeError("boom")
 
     async def fake_cleanup(services) -> list[int]:
         cycles.append("cleanup")
+        if len(cycles) >= 4:
+            done.set()
         return []
 
     monkeypatch.setattr(scheduler, "update_all_feeds", bad_update)
@@ -331,12 +336,15 @@ async def test_run_survives_a_bad_cycle(file_session_factory, monkeypatch, caplo
 
     task = asyncio.create_task(scheduler.run())
     try:
-        for _ in range(1000):
-            if len(cycles) >= 4:  # 至少跑满两轮
-                break
-            await asyncio.sleep(0)
-        else:
-            pytest.fail("run() 两轮都没跑到，是不是卡住了")
+        # 等事件 + 墙钟上限，不能按「空转多少轮」：`await asyncio.sleep(0)` 空转 1000 轮
+        # 实测只要 ~2ms，而一轮 run() 里有真 I/O —— aiosqlite 要过工作线程，SQLite 提交
+        # 要 fsync（这个夹具是文件库且没开 WAL，一次提交两次 fsync）。磁盘一忙，2ms 的
+        # 预算就在 I/O 回来之前烧完了：本地只用到 ~200 轮，CI 上却 >1000 轮，于是误报
+        # 「卡住了」（2026-10-11 的 CI 只跑到第一次 update 就判失败）。
+        try:
+            await asyncio.wait_for(done.wait(), timeout=5)
+        except TimeoutError:
+            pytest.fail(f"run() 两轮都没跑到，是不是卡住了（cycles={cycles}）")
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
